@@ -39,8 +39,9 @@ After the stack is up:
 2. Complete the Stalwart setup wizard (hostname + domain). **Disable ACME HTTP-01** — Caddy already terminates HTTPS on 443.
 3. Choose console logging (Docker captures stdout).
 4. Restart Stalwart when the wizard asks: `docker restart stalwart`.
-5. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI (Management → Domains → DNS zone file).
-6. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart.
+5. Re-run `bash apply.sh` (and `easydeploy-engine` `apply.sh --skip-kits` in integrate mode) so Caddy proxies to Stalwart HTTPS `:443` instead of bootstrap `:8080`.
+6. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI (Management → Domains → DNS zone file).
+7. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart.
 
 **Bulwark must use a different hostname** than Stalwart (`webmail.example.com` vs `mail.example.com`). Both apps serve `/api` and OAuth on the same paths, so they cannot share a host.
 
@@ -65,6 +66,37 @@ Caddy owns port 443, so Stalwart cannot complete HTTP-01 ACME for mail ports. Af
 Until then, IMAPS/SMTPS present Stalwart’s fallback certificate.
 
 ## Troubleshooting
+
+### `https://mail…/admin` returns 502 after the wizard
+
+Bootstrap listens on HTTP `:8080`. After the wizard, Stalwart serves the WebUI and JMAP on HTTPS `:443` inside the container (not published on the host). `apply.sh` switches Caddy automatically when `{data_dir}/etc/config.json` exists.
+
+If the 502 remains, force it in `deploy.yaml`:
+
+```yaml
+stalwart:
+  caddy_upstream: https
+```
+
+Then re-apply this kit and, in integrate mode, the engine:
+
+```bash
+cd /root/stalwart-easy-deploy && bash apply.sh
+cd /root/easydeploy-engine && bash apply.sh --skip-kits
+```
+
+Confirm Caddy can reach the backend:
+
+```bash
+docker exec easydeploy_caddy wget -qSO- --timeout=5 http://stalwart:8080/admin >/dev/null
+docker exec easydeploy_caddy wget -qSO- --timeout=5 --no-check-certificate https://stalwart:443/admin >/dev/null
+```
+
+The second command should return headers after the wizard; the first often fails.
+
+### Bulwark CORS errors against `mail…`
+
+Usually the same 502: the browser never gets JMAP from Stalwart. Fix the Caddy upstream first. Caddy also injects `Access-Control-Allow-Origin` for the webmail host on the mail site.
 
 ### Bulwark: “Write permission denied on settings data directory”
 

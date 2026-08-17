@@ -19,7 +19,11 @@ services:
     networks:
       - stalwart-net
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/8080'"]
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'echo >/dev/tcp/127.0.0.1/8080 || echo >/dev/tcp/127.0.0.1/443'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12

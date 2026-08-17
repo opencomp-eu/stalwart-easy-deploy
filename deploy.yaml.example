@@ -9,6 +9,9 @@ stalwart:
   image: docker.io/stalwartlabs/stalwart
   tag: "v0.16"
   data_dir: /var/lib/stalwart
+  # Caddy → Stalwart: auto uses HTTPS :443 once etc/config.json exists (post-wizard).
+  # Force with https or http if auto-detect is wrong.
+  # caddy_upstream: auto
 
 bulwark:
   enabled: true

@@ -102,6 +102,19 @@ def public_url(config: dict) -> str:
     return f"https://{hostname}"
 
 
+def stalwart_https_upstream(config: dict) -> bool:
+    """After the setup wizard, Stalwart serves HTTPS on :443; :8080 is bootstrap-only."""
+    override = str((config.get("stalwart") or {}).get("caddy_upstream") or "auto").strip().lower()
+    if override in {"https", "443"}:
+        return True
+    if override in {"http", "8080"}:
+        return False
+    data_dir = str((config.get("stalwart") or {}).get("data_dir") or "").strip()
+    if not data_dir:
+        return False
+    return (Path(data_dir) / "etc" / "config.json").is_file()
+
+
 def validate_config(config: dict) -> None:
     stalwart = config.get("stalwart") or {}
     if not isinstance(stalwart, dict):
@@ -223,7 +236,12 @@ def _proxy_headers() -> str:
     return "header_up Host {host}"
 
 
-def stalwart_caddy_block(hostname: str, cors_origin: str | None = None) -> str:
+def stalwart_caddy_block(
+    hostname: str,
+    cors_origin: str | None = None,
+    *,
+    https_upstream: bool = False,
+) -> str:
     headers = _proxy_headers()
     cors = ""
     if cors_origin:
@@ -248,11 +266,21 @@ def stalwart_caddy_block(hostname: str, cors_origin: str | None = None) -> str:
         header_down Access-Control-Expose-Headers *"""
     else:
         proxy_cors = ""
+    if https_upstream:
+        upstream = f"""reverse_proxy https://stalwart:443 {{
+        {headers}{proxy_cors}
+        transport http {{
+            tls_insecure_skip_verify
+            tls_server_name {hostname}
+        }}
+    }}"""
+    else:
+        upstream = f"""reverse_proxy stalwart:8080 {{
+        {headers}{proxy_cors}
+    }}"""
     return f"""# stalwart-easy-deploy — mail admin + JMAP
 {hostname} {{{cors}
-    reverse_proxy stalwart:8080 {{
-        {headers}{proxy_cors}
-    }}
+    {upstream}
     encode gzip
     log
 }}"""
@@ -272,12 +300,18 @@ def bulwark_caddy_block(domain: str) -> str:
 
 def site_blocks(config: dict) -> str:
     hostname = str(config["stalwart"]["hostname"]).strip()
+    https_upstream = stalwart_https_upstream(config)
     if not bulwark_enabled(config):
-        return stalwart_caddy_block(hostname)
+        return stalwart_caddy_block(hostname, https_upstream=https_upstream)
     webmail = str(config["bulwark"]["domain"]).strip()
     cors_origin = f"https://{webmail}"
     return "\n\n".join(
-        [stalwart_caddy_block(hostname, cors_origin=cors_origin), bulwark_caddy_block(webmail)]
+        [
+            stalwart_caddy_block(
+                hostname, cors_origin=cors_origin, https_upstream=https_upstream
+            ),
+            bulwark_caddy_block(webmail),
+        ]
     )
 
 
@@ -442,6 +476,10 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"JMAP:            https://{hostname}")
     print(f"Mail domain:     {domain}")
     print(f"Data directory:  {data_dir}")
+    if stalwart_https_upstream(config):
+        print("Caddy upstream:  https://stalwart:443 (wizard complete)")
+    else:
+        print("Caddy upstream:  http://stalwart:8080 (bootstrap / recovery)")
     print(f"Secrets file:    {SECRETS_PATH}")
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
     if bulwark_enabled(config):
@@ -459,8 +497,11 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"  2. Open https://{hostname}/admin and complete the Stalwart wizard.")
     print("     Hostname and domain are already set above. Disable ACME HTTP-01")
     print("     (Caddy terminates HTTPS). Choose console logging.")
-    print("  3. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI DNS zone.")
-    print("  4. Mail ports 25/465/587/993/4190 are bound on the host, not via Caddy.")
+    print("  3. After the wizard restart, re-run apply.sh (and engine apply.sh")
+    print("     --skip-kits if proxy.mode is integrate) so Caddy switches from")
+    print("     :8080 to Stalwart HTTPS :443.")
+    print("  4. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI DNS zone.")
+    print("  5. Mail ports 25/465/587/993/4190 are bound on the host, not via Caddy.")
     print()
 
 

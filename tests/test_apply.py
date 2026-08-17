@@ -16,6 +16,7 @@ from scripts.apply import (
     render_caddyfile,
     render_template,
     site_blocks,
+    stalwart_https_upstream,
     validate_config,
     write_compose_env,
 )
@@ -121,7 +122,34 @@ def test_site_blocks_include_both_hosts():
     assert "webmail.test.example" in text
     assert "reverse_proxy bulwark:3000" in text
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text
+
+
+def test_site_blocks_https_upstream_after_wizard(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "config.json").write_text("{}")
+    config = _base_config(stalwart={"data_dir": str(tmp_path)})
+    assert stalwart_https_upstream(config) is True
+    text = site_blocks(config)
+    assert "reverse_proxy https://stalwart:443" in text
+    assert "tls_insecure_skip_verify" in text
+    assert "stalwart:8080" not in text
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text
+
+
+def test_caddy_upstream_override_https():
+    config = _base_config(stalwart={"caddy_upstream": "https"})
+    assert stalwart_https_upstream(config) is True
+    assert "https://stalwart:443" in site_blocks(config)
+
+
+def test_caddy_upstream_override_http(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "config.json").write_text("{}")
+    config = _base_config(stalwart={"data_dir": str(tmp_path), "caddy_upstream": "http"})
+    assert stalwart_https_upstream(config) is False
+    assert "reverse_proxy stalwart:8080" in site_blocks(config)
 
 
 def test_site_blocks_omit_bulwark_when_disabled():

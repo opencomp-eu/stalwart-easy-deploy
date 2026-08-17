@@ -15,7 +15,9 @@ Then run `bash wizard.sh` in [easydeploy-engine](../easydeploy-engine/) (it can 
 Manual equivalent:
 
 1. `bash apply.sh` here — writes `.stalwart-easy-deploy/integration/caddy.caddy`, stops `stalwart_caddy`, and joins `easydeploy-net`
-2. `bash apply.sh` in easydeploy-engine with Stalwart enabled in `engine.yaml`
+2. `bash apply.sh --skip-kits` in easydeploy-engine so shared Caddy reloads the fragment
+
+After the Stalwart setup wizard, run both steps again. The kit switches the mail host from `stalwart:8080` to `https://stalwart:443` once `/etc/stalwart/config.json` exists.
 
 Mail ports (25, 465, 587, 993, 4190) stay bound on the host in both modes — Caddy only terminates HTTPS for the admin UI, JMAP, and Bulwark.
 
