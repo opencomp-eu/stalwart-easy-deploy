@@ -128,6 +128,16 @@ def test_site_blocks_omit_bulwark_when_disabled():
     assert "bulwark:3000" not in text
 
 
+def test_site_blocks_same_host_uses_path_routing():
+    config = _base_config(bulwark={"enabled": True, "domain": "mail.test.example", "data_dir": "/var/lib/bulwark"})
+    text = site_blocks(config)
+    assert text.count("mail.test.example {") == 1
+    assert "handle /admin*" in text
+    assert "reverse_proxy stalwart:8080" in text
+    assert "reverse_proxy bulwark:3000" in text
+    assert "webmail.test.example" not in text
+
+
 def test_render_integration_fragment(tmp_path, monkeypatch):
     from scripts.apply import render_integration_fragment
 
