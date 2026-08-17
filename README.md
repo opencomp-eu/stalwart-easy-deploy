@@ -96,7 +96,24 @@ The second command should return headers after the wizard; the first often fails
 
 ### Bulwark CORS errors against `mail…`
 
-Usually the same 502: the browser never gets JMAP from Stalwart. Fix the Caddy upstream first. Caddy also injects `Access-Control-Allow-Origin` for the webmail host on the mail site.
+Stalwart’s “permissive CORS” sends `Access-Control-Allow-Origin: *` and does not send `Allow-Credentials`. Bulwark’s browser JMAP calls are credentialed, so the browser still blocks them.
+
+Caddy on the mail host must:
+
+- answer OPTIONS itself (204)
+- replace Stalwart’s `*` with `https://<webmail-host>`
+- set `Access-Control-Allow-Credentials: true`
+- never send `Access-Control-Expose-Headers: *` together with credentials
+
+After changing Caddy, re-apply this kit and the engine (`apply.sh --skip-kits`). Permissive CORS in the Stalwart WebUI can stay on or off; Caddy overrides the origin header.
+
+Check with:
+
+```bash
+curl -sSI -H 'Origin: https://webmail.example.com' https://mail.example.com/.well-known/jmap
+```
+
+The 307 to `/jmap/session` must include `access-control-allow-origin: https://webmail.example.com` (not `*`). `curl -I` (HEAD) returns 404 here; use GET as above.
 
 ### Bulwark: “Write permission denied on settings data directory”
 

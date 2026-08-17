@@ -236,6 +236,15 @@ def _proxy_headers() -> str:
     return "header_up Host {host}"
 
 
+# Credentialed JMAP (Authorization) cannot use ACAO * or Expose-Headers *.
+# Stalwart usePermissiveCors emits * and no Allow-Credentials.
+CORS_ALLOW_HEADERS = (
+    "Authorization, Content-Type, Accept, X-Requested-With, Origin, "
+    "X-JMAP-Prefix, X-JMAP-Request-Id, X-JMAP-Session-State"
+)
+CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
+
+
 def stalwart_caddy_block(
     hostname: str,
     cors_origin: str | None = None,
@@ -244,28 +253,33 @@ def stalwart_caddy_block(
 ) -> str:
     headers = _proxy_headers()
     cors = ""
+    proxy_cors = ""
     if cors_origin:
         cors = f"""
+    header {{
+        Access-Control-Allow-Origin {cors_origin}
+        Access-Control-Allow-Credentials true
+        Access-Control-Allow-Methods "{CORS_ALLOW_METHODS}"
+        Access-Control-Allow-Headers "{CORS_ALLOW_HEADERS}"
+        Vary Origin
+        defer
+    }}
     @cors_preflight {{
         method OPTIONS
-        header Origin {cors_origin}
     }}
     handle @cors_preflight {{
-        header Access-Control-Allow-Origin {cors_origin}
-        header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
-        header Access-Control-Allow-Headers {{http.request.header.Access-Control-Request-Headers}}
-        header Access-Control-Allow-Credentials true
-        header Access-Control-Max-Age 86400
         respond 204
     }}
 """
-        proxy_cors = f"""
+        # Strip Stalwart's ACAO: * so it cannot coexist with the deferred origin.
+        # Do not delete Access-Control-Allow-Origin here after setting it —
+        # Caddy's header_down delete wins over a later set of the same name.
+        proxy_cors = """
         header_down -Access-Control-Allow-Origin
-        header_down Access-Control-Allow-Origin {cors_origin}
-        header_down Access-Control-Allow-Credentials true
-        header_down Access-Control-Expose-Headers *"""
-    else:
-        proxy_cors = ""
+        header_down -Access-Control-Allow-Credentials
+        header_down -Access-Control-Allow-Methods
+        header_down -Access-Control-Allow-Headers
+        header_down -Access-Control-Expose-Headers"""
     if https_upstream:
         upstream = f"""reverse_proxy https://stalwart:443 {{
         {headers}{proxy_cors}

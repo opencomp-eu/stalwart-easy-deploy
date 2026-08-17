@@ -122,6 +122,10 @@ def test_site_blocks_include_both_hosts():
     assert "webmail.test.example" in text
     assert "reverse_proxy bulwark:3000" in text
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text
+    assert "Access-Control-Allow-Credentials true" in text
+    assert "defer" in text
+    assert "Access-Control-Expose-Headers *" not in text
+    assert "header_down Access-Control-Allow-Origin " not in text
 
 
 def test_site_blocks_https_upstream_after_wizard(tmp_path):
@@ -135,6 +139,8 @@ def test_site_blocks_https_upstream_after_wizard(tmp_path):
     assert "tls_insecure_skip_verify" in text
     assert "stalwart:8080" not in text
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text
+    assert "defer" in text
+    assert "Access-Control-Expose-Headers *" not in text
 
 
 def test_caddy_upstream_override_https():
