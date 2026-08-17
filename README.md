@@ -35,12 +35,14 @@ bash apply.sh
 
 After the stack is up:
 
-1. Open `https://mail.example.com/admin` with the recovery admin printed by `apply.sh`.
+1. Open `https://mail.example.com/admin` and sign in with the **Stalwart recovery admin** from `.stalwart-easy-deploy/secrets.yaml` (`RECOVERY_ADMIN_PASSWORD`). This is not the Authelia user.
 2. Complete the Stalwart setup wizard (hostname + domain). **Disable ACME HTTP-01** — Caddy already terminates HTTPS on 443.
 3. Choose console logging (Docker captures stdout).
 4. Restart Stalwart when the wizard asks: `docker restart stalwart`.
 5. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI (Management → Domains → DNS zone file).
 6. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart.
+
+Prefer a **separate webmail hostname** (`webmail.example.com`). Putting Bulwark on the same host as Stalwart requires path splitting (`/login` and `/auth` stay on Stalwart).
 
 ## Configuration
 

@@ -249,21 +249,12 @@ def bulwark_caddy_block(domain: str) -> str:
 
 
 def combined_caddy_block(hostname: str) -> str:
-    """One public host: Stalwart keeps /admin, JMAP, and well-known; Bulwark gets /."""
+    """One public host: Stalwart keeps admin/JMAP/OAuth; Bulwark gets /."""
     headers = _proxy_headers()
     return f"""# stalwart-easy-deploy — mail admin + JMAP + webmail (same host)
 {hostname} {{
-    handle /admin* {{
-        reverse_proxy stalwart:8080 {{
-            {headers}
-        }}
-    }}
-    handle /jmap* {{
-        reverse_proxy stalwart:8080 {{
-            {headers}
-        }}
-    }}
-    handle /.well-known/* {{
+    @stalwart path /admin* /login* /auth* /jmap* /.well-known* /dav* /mail* /autodiscover* /healthz* /calendar* /robots.txt
+    handle @stalwart {{
         reverse_proxy stalwart:8080 {{
             {headers}
         }}
@@ -455,7 +446,8 @@ def print_summary(config: dict, secrets: dict) -> None:
         webmail = str(config["bulwark"]["domain"])
         print(f"Webmail:         https://{webmail}")
         if same_public_host(config):
-            print("                 same host as mail: /admin and /jmap → Stalwart, / → Bulwark")
+            print("                 same host as mail: /admin /login /auth /jmap → Stalwart, / → Bulwark")
+            print("                 Admin login is the Stalwart recovery user in secrets.yaml, not Authelia.")
     if proxy_mode(config) == "integrate":
         print(f"Proxy mode:      integrate (Caddy fragment: {INTEGRATION_CADDY_FRAGMENT})")
         print("                 Run easydeploy-engine apply.sh to refresh the shared Caddy.")

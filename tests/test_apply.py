@@ -133,7 +133,9 @@ def test_site_blocks_same_host_uses_path_routing():
     config = _base_config(bulwark={"enabled": True, "domain": "mail.test.example", "data_dir": "/var/lib/bulwark"})
     text = site_blocks(config)
     assert text.count("mail.test.example {") == 1
-    assert "handle /admin*" in text
+    assert "@stalwart path" in text
+    assert "/login*" in text
+    assert "/auth*" in text
     assert "reverse_proxy stalwart:8080" in text
     assert "reverse_proxy bulwark:3000" in text
     assert "webmail.test.example" not in text
