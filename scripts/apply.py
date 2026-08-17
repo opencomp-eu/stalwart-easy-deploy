@@ -249,11 +249,17 @@ def bulwark_caddy_block(domain: str) -> str:
 
 
 def combined_caddy_block(hostname: str) -> str:
-    """One public host: Stalwart keeps admin/JMAP/OAuth; Bulwark gets /."""
+    """One public host: Stalwart keeps admin/JMAP/OAuth; Bulwark keeps / and its APIs."""
     headers = _proxy_headers()
     return f"""# stalwart-easy-deploy — mail admin + JMAP + webmail (same host)
 {hostname} {{
-    @stalwart path /admin* /login* /auth* /jmap* /.well-known* /dav* /mail* /autodiscover* /healthz* /calendar* /robots.txt
+    @bulwark_api path /api/health* /api/settings*
+    handle @bulwark_api {{
+        reverse_proxy bulwark:3000 {{
+            {headers}
+        }}
+    }}
+    @stalwart path /admin* /login* /auth* /oauth* /jmap* /.well-known* /api* /dav* /mail* /autodiscover* /healthz* /calendar* /robots.txt
     handle @stalwart {{
         reverse_proxy stalwart:8080 {{
             {headers}
