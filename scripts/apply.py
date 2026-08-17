@@ -223,12 +223,35 @@ def _proxy_headers() -> str:
     return "header_up Host {host}"
 
 
-def stalwart_caddy_block(hostname: str) -> str:
+def stalwart_caddy_block(hostname: str, cors_origin: str | None = None) -> str:
     headers = _proxy_headers()
+    cors = ""
+    if cors_origin:
+        cors = f"""
+    @cors_preflight {{
+        method OPTIONS
+        header Origin {cors_origin}
+    }}
+    handle @cors_preflight {{
+        header Access-Control-Allow-Origin {cors_origin}
+        header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
+        header Access-Control-Allow-Headers {{http.request.header.Access-Control-Request-Headers}}
+        header Access-Control-Allow-Credentials true
+        header Access-Control-Max-Age 86400
+        respond 204
+    }}
+"""
+        proxy_cors = f"""
+        header_down -Access-Control-Allow-Origin
+        header_down Access-Control-Allow-Origin {cors_origin}
+        header_down Access-Control-Allow-Credentials true
+        header_down Access-Control-Expose-Headers *"""
+    else:
+        proxy_cors = ""
     return f"""# stalwart-easy-deploy — mail admin + JMAP
-{hostname} {{
+{hostname} {{{cors}
     reverse_proxy stalwart:8080 {{
-        {headers}
+        {headers}{proxy_cors}
     }}
     encode gzip
     log
@@ -252,7 +275,10 @@ def site_blocks(config: dict) -> str:
     if not bulwark_enabled(config):
         return stalwart_caddy_block(hostname)
     webmail = str(config["bulwark"]["domain"]).strip()
-    return "\n\n".join([stalwart_caddy_block(hostname), bulwark_caddy_block(webmail)])
+    cors_origin = f"https://{webmail}"
+    return "\n\n".join(
+        [stalwart_caddy_block(hostname, cors_origin=cors_origin), bulwark_caddy_block(webmail)]
+    )
 
 
 def render_caddyfile(config: dict) -> None:

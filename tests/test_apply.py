@@ -120,6 +120,8 @@ def test_site_blocks_include_both_hosts():
     assert "reverse_proxy stalwart:8080" in text
     assert "webmail.test.example" in text
     assert "reverse_proxy bulwark:3000" in text
+    assert "Access-Control-Allow-Origin https://webmail.test.example" in text
+    assert "Access-Control-Allow-Origin https://webmail.test.example" in text
 
 
 def test_site_blocks_omit_bulwark_when_disabled():
