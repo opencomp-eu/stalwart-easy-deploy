@@ -42,7 +42,7 @@ After the stack is up:
 5. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI (Management → Domains → DNS zone file).
 6. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart.
 
-Prefer a **separate webmail hostname** (`webmail.example.com`). Putting Bulwark on the same host as Stalwart requires path splitting (`/login` and `/auth` stay on Stalwart).
+**Bulwark must use a different hostname** than Stalwart (`webmail.example.com` vs `mail.example.com`). Both apps serve `/api` and OAuth on the same paths, so they cannot share a host.
 
 ## Configuration
 

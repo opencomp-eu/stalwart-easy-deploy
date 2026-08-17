@@ -129,18 +129,10 @@ def test_site_blocks_omit_bulwark_when_disabled():
     assert "bulwark:3000" not in text
 
 
-def test_site_blocks_same_host_uses_path_routing():
+def test_validate_config_rejects_shared_hostname():
     config = _base_config(bulwark={"enabled": True, "domain": "mail.test.example", "data_dir": "/var/lib/bulwark"})
-    text = site_blocks(config)
-    assert text.count("mail.test.example {") == 1
-    assert "@stalwart path" in text
-    assert "/login*" in text
-    assert "/auth*" in text
-    assert "/api*" in text
-    assert "@bulwark_api path" in text
-    assert "reverse_proxy stalwart:8080" in text
-    assert "reverse_proxy bulwark:3000" in text
-    assert "webmail.test.example" not in text
+    with pytest.raises(ValueError, match="must differ from stalwart.hostname"):
+        validate_config(config)
 
 
 def test_render_integration_fragment(tmp_path, monkeypatch):

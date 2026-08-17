@@ -130,16 +130,15 @@ def validate_config(config: dict) -> None:
             raise ValueError("bulwark.domain must be set to your real webmail domain")
         if not str(bulwark.get("data_dir") or "").strip():
             raise ValueError("bulwark.data_dir must be set when bulwark is enabled")
+        hostname = str(stalwart.get("hostname") or "").strip()
+        if hostname.lower() == webmail.lower():
+            raise ValueError(
+                "bulwark.domain must differ from stalwart.hostname. "
+                "Both apps serve /api and OAuth on the same paths, so they cannot "
+                "share a host. Use e.g. webmail.example.com for Bulwark."
+            )
 
     proxy_mode(config)
-
-
-def same_public_host(config: dict) -> bool:
-    if not bulwark_enabled(config):
-        return False
-    hostname = str(config["stalwart"]["hostname"]).strip().lower()
-    webmail = str(config["bulwark"]["domain"]).strip().lower()
-    return bool(hostname) and hostname == webmail
 
 
 def derive_compose_files(config: dict) -> list[str]:
@@ -248,40 +247,11 @@ def bulwark_caddy_block(domain: str) -> str:
 }}"""
 
 
-def combined_caddy_block(hostname: str) -> str:
-    """One public host: Stalwart keeps admin/JMAP/OAuth; Bulwark keeps / and its APIs."""
-    headers = _proxy_headers()
-    return f"""# stalwart-easy-deploy — mail admin + JMAP + webmail (same host)
-{hostname} {{
-    @bulwark_api path /api/health* /api/settings*
-    handle @bulwark_api {{
-        reverse_proxy bulwark:3000 {{
-            {headers}
-        }}
-    }}
-    @stalwart path /admin* /login* /auth* /oauth* /jmap* /.well-known* /api* /dav* /mail* /autodiscover* /healthz* /calendar* /robots.txt
-    handle @stalwart {{
-        reverse_proxy stalwart:8080 {{
-            {headers}
-        }}
-    }}
-    handle {{
-        reverse_proxy bulwark:3000 {{
-            {headers}
-        }}
-    }}
-    encode gzip
-    log
-}}"""
-
-
 def site_blocks(config: dict) -> str:
     hostname = str(config["stalwart"]["hostname"]).strip()
     if not bulwark_enabled(config):
         return stalwart_caddy_block(hostname)
     webmail = str(config["bulwark"]["domain"]).strip()
-    if same_public_host(config):
-        return combined_caddy_block(hostname)
     return "\n\n".join([stalwart_caddy_block(hostname), bulwark_caddy_block(webmail)])
 
 
@@ -449,11 +419,7 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"Secrets file:    {SECRETS_PATH}")
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
     if bulwark_enabled(config):
-        webmail = str(config["bulwark"]["domain"])
-        print(f"Webmail:         https://{webmail}")
-        if same_public_host(config):
-            print("                 same host as mail: /admin /login /auth /jmap → Stalwart, / → Bulwark")
-            print("                 Admin login is the Stalwart recovery user in secrets.yaml, not Authelia.")
+        print(f"Webmail:         https://{config['bulwark']['domain']}")
     if proxy_mode(config) == "integrate":
         print(f"Proxy mode:      integrate (Caddy fragment: {INTEGRATION_CADDY_FRAGMENT})")
         print("                 Run easydeploy-engine apply.sh to refresh the shared Caddy.")
@@ -462,7 +428,7 @@ def print_summary(config: dict, secrets: dict) -> None:
     print()
     print("First boot:")
     print(f"  1. Point DNS A/AAAA for {hostname} at this server.")
-    if bulwark_enabled(config) and not same_public_host(config):
+    if bulwark_enabled(config):
         print(f"     Also point {config['bulwark']['domain']} here.")
     print(f"  2. Open https://{hostname}/admin and complete the Stalwart wizard.")
     print("     Hostname and domain are already set above. Disable ACME HTTP-01")

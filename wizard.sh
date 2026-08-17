@@ -74,9 +74,7 @@ gather_config() {
 		ask bulwark_domain "Webmail domain" "$bulwark_domain"
 		ask bulwark_data_dir "Bulwark data directory" "$bulwark_data_dir"
 		if [[ "${bulwark_domain,,}" == "${hostname,,}" ]]; then
-			echo
-			warn "Same host as mail: Stalwart admin uses /admin, /login, /auth; Bulwark uses /."
-			warn "A separate subdomain (webmail.${domain}) is more reliable."
+			die "Webmail domain must differ from the mail hostname (both apps use /api). Use e.g. webmail.${domain}"
 		fi
 	fi
 
