@@ -27,6 +27,9 @@ INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 STALWART_UID = 2000
+# ghcr.io/bulwarkmail/webmail runs as USER nextjs (uid 1001, gid 1001)
+BULWARK_UID = 1001
+BULWARK_GID = 1001
 
 PLACEHOLDER_HOSTS = frozenset({"mail.example.com", "example.com"})
 PLACEHOLDER_WEBMAIL = frozenset({"webmail.example.com"})
@@ -185,13 +188,19 @@ def load_or_create_secrets(config: dict | None = None) -> dict:
     return data
 
 
-def chown_stalwart(path: Path) -> None:
+def chown_path(path: Path, uid: int, gid: int) -> None:
     try:
-        os.chown(path, STALWART_UID, STALWART_UID)
+        os.chown(path, uid, gid)
     except PermissionError:
         pass
     except OSError:
         pass
+
+
+def chown_tree(path: Path, uid: int, gid: int) -> None:
+    chown_path(path, uid, gid)
+    for child in path.rglob("*"):
+        chown_path(child, uid, gid)
 
 
 def ensure_data_dirs(config: dict) -> None:
@@ -201,18 +210,18 @@ def ensure_data_dirs(config: dict) -> None:
     data_dir = root / "data"
     for path in (etc_dir, data_dir):
         path.mkdir(parents=True, exist_ok=True)
-        chown_stalwart(path)
+        chown_path(path, STALWART_UID, STALWART_UID)
 
     if bulwark_enabled(config):
         bulwark_root = Path(str(config["bulwark"]["data_dir"]))
+        bulwark_root.mkdir(parents=True, exist_ok=True)
         for name in ("settings", "admin", "admin-state", "telemetry"):
             (bulwark_root / name).mkdir(parents=True, exist_ok=True)
+        chown_tree(bulwark_root, BULWARK_UID, BULWARK_GID)
 
 
 def _proxy_headers() -> str:
-    return """header_up Host {host}
-        header_up X-Forwarded-Host {host}
-        header_up X-Forwarded-Proto {scheme}"""
+    return "header_up Host {host}"
 
 
 def stalwart_caddy_block(hostname: str) -> str:

@@ -62,6 +62,21 @@ Caddy owns port 443, so Stalwart cannot complete HTTP-01 ACME for mail ports. Af
 
 Until then, IMAPS/SMTPS present Stalwart’s fallback certificate.
 
+## Troubleshooting
+
+### Bulwark: “Write permission denied on settings data directory”
+
+The image runs as UID **1001** (`nextjs`). `apply.sh` chowns `bulwark.data_dir` to that user. If you created the directory by hand as root, fix it once:
+
+```bash
+chown -R 1001:1001 /var/lib/bulwark
+docker restart bulwark
+```
+
+### Sending mail does nothing
+
+Finish the Stalwart setup wizard at `https://<mail-host>/admin` (disable HTTP-01 ACME; Caddy already terminates HTTPS). Until the default domain exists, JMAP login can work while outbound submission does not. Then publish MX/SPF/DKIM/DMARC from Management → Domains.
+
 ## Day-to-day
 
 ```bash

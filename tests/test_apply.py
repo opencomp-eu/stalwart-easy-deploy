@@ -10,6 +10,7 @@ import yaml
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
     derive_compose_files,
+    ensure_data_dirs,
     load_or_create_secrets,
     public_url,
     render_caddyfile,
@@ -206,3 +207,20 @@ def test_write_compose_env(tmp_path, monkeypatch):
     assert "JMAP_SERVER_URL=https://mail.test.example" in text
     assert "BULWARK_SESSION_SECRET=sess" in text
     assert "SMTP_PORT=25" in text
+
+
+def test_ensure_data_dirs_creates_bulwark_layout(tmp_path):
+    config = _base_config(
+        stalwart={"data_dir": str(tmp_path / "stalwart")},
+        bulwark={
+            "enabled": True,
+            "domain": "webmail.test.example",
+            "data_dir": str(tmp_path / "bulwark"),
+        },
+    )
+    ensure_data_dirs(config)
+    assert (tmp_path / "stalwart" / "etc").is_dir()
+    assert (tmp_path / "stalwart" / "data").is_dir()
+    for name in ("settings", "admin", "admin-state", "telemetry"):
+        assert (tmp_path / "bulwark" / name).is_dir()
+
