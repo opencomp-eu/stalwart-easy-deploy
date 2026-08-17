@@ -1,0 +1,43 @@
+---
+services:
+  bulwark:
+    container_name: bulwark
+    image: ${BULWARK_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      stalwart:
+        condition: service_healthy
+    environment:
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+      APP_NAME: ${BULWARK_APP_NAME:-Webmail}
+      JMAP_SERVER_URL: ${JMAP_SERVER_URL}
+      SESSION_SECRET: ${BULWARK_SESSION_SECRET}
+      SETTINGS_SYNC_ENABLED: "true"
+      STALWART_FEATURES: "true"
+    volumes:
+      - ${BULWARK_DATA_DIR}/settings:/app/data/settings
+      - ${BULWARK_DATA_DIR}/admin:/app/data/admin
+      - ${BULWARK_DATA_DIR}/admin-state:/app/data/admin-state
+      - ${BULWARK_DATA_DIR}/telemetry:/app/data/telemetry
+    networks:
+      - stalwart-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3000/api/health",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  stalwart-net:
+    external: true
+    name: stalwart-net

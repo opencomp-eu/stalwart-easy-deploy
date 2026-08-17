@@ -1,0 +1,21 @@
+# Generated runtime state
+.stalwart-easy-deploy/
+compose/.env
+
+# Rendered configs
+caddy/Caddyfile
+
+# Python
+*.pyc
+__pycache__/
+.pycache/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

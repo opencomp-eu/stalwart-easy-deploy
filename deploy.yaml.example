@@ -1,0 +1,35 @@
+# stalwart-easy-deploy — operator configuration
+# Copy to deploy.yaml and run: bash apply.sh
+
+stalwart:
+  # Public hostname (MX target, admin UI, JMAP / OAuth discovery)
+  hostname: mail.example.com
+  # Primary email domain served by this installation
+  domain: example.com
+  image: docker.io/stalwartlabs/stalwart
+  tag: "v0.16"
+  data_dir: /var/lib/stalwart
+
+bulwark:
+  enabled: true
+  domain: webmail.example.com
+  image: ghcr.io/bulwarkmail/webmail
+  tag: "1.7.5"
+  data_dir: /var/lib/bulwark
+  app_name: Webmail
+
+# Host bindings for mail protocols (Caddy does not proxy these)
+ports:
+  smtp: 25
+  submission: 587
+  submissions: 465
+  imaps: 993
+  sieve: 4190
+
+proxy:
+  type: caddy
+  # standalone — this kit runs its own Caddy on :443 (single-service VPS)
+  # integrate — join easydeploy-net; easydeploy-engine owns Caddy (multi-service VPS)
+  mode: standalone
+  integrate:
+    network: easydeploy-net

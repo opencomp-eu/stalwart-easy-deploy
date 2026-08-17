@@ -1,0 +1,14 @@
+---
+services:
+  bulwark:
+    networks:
+      - stalwart-net
+      - easydeploy-net
+
+networks:
+  easydeploy-net:
+    external: true
+    name: easydeploy-net
+  stalwart-net:
+    external: true
+    name: stalwart-net

@@ -1,0 +1,28 @@
+---
+services:
+  caddy:
+    container_name: stalwart_caddy
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      stalwart:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ${SED_CADDYFILE}:/etc/caddy/Caddyfile:ro
+      - stalwart_caddy_data:/data
+      - stalwart_caddy_config:/config
+    networks:
+      - stalwart-net
+
+volumes:
+  stalwart_caddy_data:
+  stalwart_caddy_config:
+
+networks:
+  stalwart-net:
+    external: true
+    name: stalwart-net

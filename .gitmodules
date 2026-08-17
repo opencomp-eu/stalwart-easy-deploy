@@ -1,0 +1,4 @@
+[submodule "easydeploy-lib"]
+	path = easydeploy-lib
+	url = https://github.com/nordwestt/easy-deploy-lib.git
+	branch = main

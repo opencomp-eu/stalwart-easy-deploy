@@ -1,0 +1,30 @@
+---
+services:
+  stalwart:
+    container_name: stalwart
+    image: ${STALWART_IMAGE}
+    restart: unless-stopped
+    environment:
+      STALWART_PUBLIC_URL: ${STALWART_PUBLIC_URL}
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN}
+    ports:
+      - "${SMTP_PORT:-25}:25"
+      - "${SUBMISSION_PORT:-587}:587"
+      - "${SUBMISSIONS_PORT:-465}:465"
+      - "${IMAPS_PORT:-993}:993"
+      - "${SIEVE_PORT:-4190}:4190"
+    volumes:
+      - ${STALWART_ETC_DIR}:/etc/stalwart
+      - ${STALWART_DATA_DIR}:/var/lib/stalwart
+    networks:
+      - stalwart-net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/8080'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+networks:
+  stalwart-net:
+    name: stalwart-net

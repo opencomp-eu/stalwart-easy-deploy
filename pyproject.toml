@@ -1,0 +1,23 @@
+[project]
+name = "stalwart-easy-deploy"
+version = "0.1.0"
+description = "Production-oriented Stalwart + Bulwark VPS deployment toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
