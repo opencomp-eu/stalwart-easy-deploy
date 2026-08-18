@@ -128,21 +128,16 @@ def test_site_blocks_include_both_hosts():
     assert "header_down Access-Control-Allow-Origin " not in text
 
 
-def test_site_blocks_https_upstream_after_wizard(tmp_path):
+def test_site_blocks_stay_on_http_after_wizard(tmp_path):
     etc = tmp_path / "etc"
     etc.mkdir()
     (etc / "config.json").write_text("{}")
     config = _base_config(stalwart={"data_dir": str(tmp_path)})
-    assert stalwart_https_upstream(config) is True
+    assert stalwart_https_upstream(config) is False
     text = site_blocks(config)
-    assert "reverse_proxy https://stalwart:443" in text
-    assert "tls_insecure_skip_verify" in text
-    assert "handle_errors 502 503" in text
     assert "reverse_proxy stalwart:8080" in text
-    assert text.index("https://stalwart:443") < text.index("handle_errors 502 503")
-    assert "Access-Control-Allow-Origin https://webmail.test.example" in text
-    assert "defer" in text
-    assert "Access-Control-Expose-Headers *" not in text
+    assert text.index("stalwart:8080") < text.index("handle_errors 502 503")
+    assert text.index("handle_errors 502 503") < text.index("https://stalwart:443")
 
 
 def test_caddy_upstream_override_https():

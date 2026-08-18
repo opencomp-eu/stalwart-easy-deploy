@@ -103,16 +103,14 @@ def public_url(config: dict) -> str:
 
 
 def stalwart_https_upstream(config: dict) -> bool:
-    """After the setup wizard, Stalwart serves HTTPS on :443; :8080 is bootstrap-only."""
-    override = str((config.get("stalwart") or {}).get("caddy_upstream") or "auto").strip().lower()
-    if override in {"https", "443"}:
-        return True
-    if override in {"http", "8080"}:
-        return False
-    data_dir = str((config.get("stalwart") or {}).get("data_dir") or "").strip()
-    if not data_dir:
-        return False
-    return (Path(data_dir) / "etc" / "config.json").is_file()
+    """Caddy terminates TLS. Stalwart HTTP :8080 is the reverse-proxy upstream.
+
+    Post-wizard HTTPS :443 inside the container often resets Caddy (self-signed
+    listener, Proxy Protocol, or TLS-on-TLS). Keep :8080 as primary unless the
+    operator explicitly sets stalwart.caddy_upstream: https.
+    """
+    override = str((config.get("stalwart") or {}).get("caddy_upstream") or "http").strip().lower()
+    return override in {"https", "443"}
 
 
 def validate_config(config: dict) -> None:
@@ -298,8 +296,7 @@ def stalwart_caddy_block(
         header_down -Access-Control-Expose-Headers"""
     http_up = _http_upstream(headers, proxy_cors)
     https_up = _https_upstream(hostname, headers, proxy_cors)
-    # After the wizard, :443 is primary and :8080 is bootstrap/recovery.
-    # Overnight restarts sometimes leave only one of them listening — fail over.
+    # Caddy terminates public TLS. Prefer HTTP :8080; fail over to :443.
     if https_upstream:
         primary, fallback = https_up, http_up
     else:
@@ -510,9 +507,9 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"Mail domain:     {domain}")
     print(f"Data directory:  {data_dir}")
     if stalwart_https_upstream(config):
-        print("Caddy upstream:  https://stalwart:443 (wizard complete)")
+        print("Caddy upstream:  https://stalwart:443")
     else:
-        print("Caddy upstream:  http://stalwart:8080 (bootstrap / recovery)")
+        print("Caddy upstream:  http://stalwart:8080 (Caddy terminates TLS)")
     print(f"Secrets file:    {SECRETS_PATH}")
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
     if bulwark_enabled(config):
@@ -530,9 +527,9 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"  2. Open https://{hostname}/admin and complete the Stalwart wizard.")
     print("     Hostname and domain are already set above. Disable ACME HTTP-01")
     print("     (Caddy terminates HTTPS). Choose console logging.")
-    print("  3. After the wizard restart, re-run apply.sh (and engine apply.sh")
-    print("     --skip-kits if proxy.mode is integrate) so Caddy switches from")
-    print("     :8080 to Stalwart HTTPS :443.")
+    print("  3. After the wizard restart, re-run apply.sh so Caddy keeps proxying")
+    print("     HTTP to stalwart:8080 (Caddy already terminates HTTPS).")
+    print("     In integrate mode also run engine apply.sh --skip-kits.")
     print("  4. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI DNS zone.")
     print("  5. Mail ports 25/465/587/993/4190 are bound on the host, not via Caddy.")
     print()

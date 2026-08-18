@@ -39,7 +39,7 @@ After the stack is up:
 2. Complete the Stalwart setup wizard (hostname + domain). **Disable ACME HTTP-01** — Caddy already terminates HTTPS on 443.
 3. Choose console logging (Docker captures stdout).
 4. Restart Stalwart when the wizard asks: `docker restart stalwart`.
-5. Re-run `bash apply.sh` (and `easydeploy-engine` `apply.sh --skip-kits` in integrate mode) so Caddy proxies to Stalwart HTTPS `:443` instead of bootstrap `:8080`.
+5. Re-run `bash apply.sh` (and `easydeploy-engine` `apply.sh --skip-kits` in integrate mode) so Caddy keeps proxying to Stalwart HTTP `:8080`.
 6. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI (Management → Domains → DNS zone file).
 7. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart.
 
@@ -82,7 +82,13 @@ docker exec easydeploy_caddy wget -S --timeout=5 --no-check-certificate https://
 
 If the container exited or is restarting, `docker restart stalwart` often brings it back. If `config.json` is missing under `{data_dir}/etc`, the wizard did not persist and Stalwart is in bootstrap again (`chown 2000:2000` that directory).
 
-Caddy prefers HTTPS `:443` after the wizard and fails over to HTTP `:8080` on 502/503. Re-apply this kit and the engine after pulling that change.
+Caddy proxies **HTTP `:8080`** (Stalwart’s reverse-proxy listener). HTTPS `:443` inside the container often resets Caddy (`wget: Connection reset by peer`). If you still 502, confirm the live Caddyfile uses `reverse_proxy stalwart:8080` first:
+
+```bash
+grep -A6 'mail.opencomp.eu' /root/easydeploy-engine/caddy/Caddyfile
+```
+
+Then kit apply **and** `cd /root/easydeploy-engine && bash apply.sh --skip-kits`.
 
 ### Bulwark CORS errors against `mail…`
 
