@@ -137,7 +137,9 @@ def test_site_blocks_https_upstream_after_wizard(tmp_path):
     text = site_blocks(config)
     assert "reverse_proxy https://stalwart:443" in text
     assert "tls_insecure_skip_verify" in text
-    assert "stalwart:8080" not in text
+    assert "handle_errors 502 503" in text
+    assert "reverse_proxy stalwart:8080" in text
+    assert text.index("https://stalwart:443") < text.index("handle_errors 502 503")
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text
     assert "defer" in text
     assert "Access-Control-Expose-Headers *" not in text
@@ -155,7 +157,11 @@ def test_caddy_upstream_override_http(tmp_path):
     (etc / "config.json").write_text("{}")
     config = _base_config(stalwart={"data_dir": str(tmp_path), "caddy_upstream": "http"})
     assert stalwart_https_upstream(config) is False
-    assert "reverse_proxy stalwart:8080" in site_blocks(config)
+    text = site_blocks(config)
+    assert "reverse_proxy stalwart:8080" in text
+    assert "handle_errors 502 503" in text
+    assert text.index("stalwart:8080") < text.index("handle_errors 502 503")
+    assert text.index("handle_errors 502 503") < text.index("https://stalwart:443")
 
 
 def test_site_blocks_omit_bulwark_when_disabled():

@@ -245,6 +245,22 @@ CORS_ALLOW_HEADERS = (
 CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
 
 
+def _http_upstream(headers: str, proxy_cors: str) -> str:
+    return f"""reverse_proxy stalwart:8080 {{
+        {headers}{proxy_cors}
+    }}"""
+
+
+def _https_upstream(hostname: str, headers: str, proxy_cors: str) -> str:
+    return f"""reverse_proxy https://stalwart:443 {{
+        {headers}{proxy_cors}
+        transport http {{
+            tls_insecure_skip_verify
+            tls_server_name {hostname}
+        }}
+    }}"""
+
+
 def stalwart_caddy_block(
     hostname: str,
     cors_origin: str | None = None,
@@ -280,21 +296,24 @@ def stalwart_caddy_block(
         header_down -Access-Control-Allow-Methods
         header_down -Access-Control-Allow-Headers
         header_down -Access-Control-Expose-Headers"""
+    http_up = _http_upstream(headers, proxy_cors)
+    https_up = _https_upstream(hostname, headers, proxy_cors)
+    # After the wizard, :443 is primary and :8080 is bootstrap/recovery.
+    # Overnight restarts sometimes leave only one of them listening — fail over.
     if https_upstream:
-        upstream = f"""reverse_proxy https://stalwart:443 {{
-        {headers}{proxy_cors}
-        transport http {{
-            tls_insecure_skip_verify
-            tls_server_name {hostname}
-        }}
-    }}"""
+        primary, fallback = https_up, http_up
     else:
-        upstream = f"""reverse_proxy stalwart:8080 {{
-        {headers}{proxy_cors}
-    }}"""
+        primary, fallback = http_up, https_up
+    fallback_indented = "\n".join(
+        f"        {line}" if line.strip() else line for line in fallback.splitlines()
+    )
     return f"""# stalwart-easy-deploy — mail admin + JMAP
 {hostname} {{{cors}
-    {upstream}
+    {primary}
+
+    handle_errors 502 503 {{
+{fallback_indented}
+    }}
     encode gzip
     log
 }}"""

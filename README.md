@@ -67,32 +67,22 @@ Until then, IMAPS/SMTPS present Stalwart’s fallback certificate.
 
 ## Troubleshooting
 
-### `https://mail…/admin` returns 502 after the wizard
+### `https://mail…/admin` returns 502
 
-Bootstrap listens on HTTP `:8080`. After the wizard, Stalwart serves the WebUI and JMAP on HTTPS `:443` inside the container (not published on the host). `apply.sh` switches Caddy automatically when `{data_dir}/etc/config.json` exists.
+Caddy is up but cannot reach the Stalwart container. Webmail may still load; JMAP then looks like a CORS error because OPTIONS is answered by Caddy while GET/POST to `mail…` is 502.
 
-If the 502 remains, force it in `deploy.yaml`:
-
-```yaml
-stalwart:
-  caddy_upstream: https
-```
-
-Then re-apply this kit and, in integrate mode, the engine:
+First check whether Stalwart is running:
 
 ```bash
-cd /root/stalwart-easy-deploy && bash apply.sh
-cd /root/easydeploy-engine && bash apply.sh --skip-kits
+docker ps -a --filter name=stalwart
+docker logs stalwart --tail 80
+docker exec easydeploy_caddy wget -S --timeout=5 http://stalwart:8080/admin -O /dev/null
+docker exec easydeploy_caddy wget -S --timeout=5 --no-check-certificate https://stalwart:443/admin -O /dev/null
 ```
 
-Confirm Caddy can reach the backend:
+If the container exited or is restarting, `docker restart stalwart` often brings it back. If `config.json` is missing under `{data_dir}/etc`, the wizard did not persist and Stalwart is in bootstrap again (`chown 2000:2000` that directory).
 
-```bash
-docker exec easydeploy_caddy wget -qSO- --timeout=5 http://stalwart:8080/admin >/dev/null
-docker exec easydeploy_caddy wget -qSO- --timeout=5 --no-check-certificate https://stalwart:443/admin >/dev/null
-```
-
-The second command should return headers after the wizard; the first often fails.
+Caddy prefers HTTPS `:443` after the wizard and fails over to HTTP `:8080` on 502/503. Re-apply this kit and the engine after pulling that change.
 
 ### Bulwark CORS errors against `mail…`
 
