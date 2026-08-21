@@ -93,6 +93,10 @@ def integrate_network_name(config: dict) -> str:
     return name or DEFAULT_INTEGRATE_NETWORK
 
 
+def recovery_mode(config: dict) -> bool:
+    return to_bool((config.get("stalwart") or {}).get("recovery_mode", False))
+
+
 def bulwark_enabled(config: dict) -> bool:
     return to_bool((config.get("bulwark") or {}).get("enabled", True))
 
@@ -162,6 +166,8 @@ def derive_compose_files(config: dict) -> list[str]:
             files.append("integrate-bulwark.yml")
     else:
         files.append("caddy.yml")
+    if recovery_mode(config):
+        files.append("recovery.yml")
     return files
 
 
@@ -246,6 +252,10 @@ CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
 def _http_upstream(headers: str, proxy_cors: str) -> str:
     return f"""reverse_proxy stalwart:8080 {{
         {headers}{proxy_cors}
+        transport http {{
+            versions 1.1
+            proxy_protocol v2
+        }}
     }}"""
 
 
@@ -510,6 +520,9 @@ def print_summary(config: dict, secrets: dict) -> None:
         print("Caddy upstream:  https://stalwart:443")
     else:
         print("Caddy upstream:  http://stalwart:8080 (Caddy terminates TLS)")
+    if recovery_mode(config):
+        print("Recovery mode:   ON (HTTP :8080 bootstrap/recovery listener forced)")
+        print("                 Turn off stalwart.recovery_mode after /admin works.")
     print(f"Secrets file:    {SECRETS_PATH}")
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
     if bulwark_enabled(config):

@@ -82,13 +82,22 @@ docker exec easydeploy_caddy wget -S --timeout=5 --no-check-certificate https://
 
 If the container exited or is restarting, `docker restart stalwart` often brings it back. If `config.json` is missing under `{data_dir}/etc`, the wizard did not persist and Stalwart is in bootstrap again (`chown 2000:2000` that directory).
 
-Caddy proxies **HTTP `:8080`** (Stalwart’s reverse-proxy listener). HTTPS `:443` inside the container often resets Caddy (`wget: Connection reset by peer`). If you still 502, confirm the live Caddyfile uses `reverse_proxy stalwart:8080` first:
+If `/admin` is 502 but `127.0.0.1:8080` inside the Stalwart container returns HTTP 302 while `docker exec easydeploy_caddy wget http://stalwart:8080/admin` resets the connection, the HTTP listener expects **Proxy Protocol** from Docker IPs. Caddy must send it:
 
-```bash
-grep -A6 'mail.opencomp.eu' /root/easydeploy-engine/caddy/Caddyfile
+```
+transport http {
+    versions 1.1
+    proxy_protocol v2
+}
 ```
 
-Then kit apply **and** `cd /root/easydeploy-engine && bash apply.sh --skip-kits`.
+`apply.sh` emits that on the `:8080` reverse_proxy. Do not use `recovery_mode` for this case.
+
+Confirm the live Caddyfile uses `reverse_proxy stalwart:8080` first:
+
+```bash
+sed -n '/^mail.opencomp.eu {/,/^}/p' /root/easydeploy-engine/caddy/Caddyfile
+```
 
 ### Bulwark CORS errors against `mail…`
 

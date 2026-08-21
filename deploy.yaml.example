@@ -12,6 +12,7 @@ stalwart:
   # Caddy terminates HTTPS and proxies plain HTTP to Stalwart :8080.
   # Only set https if you have a working TLS listener on stalwart:443.
   # caddy_upstream: http
+  # recovery_mode: false  # set true to force Stalwart HTTP :8080 if /admin 502s
 
 bulwark:
   enabled: true

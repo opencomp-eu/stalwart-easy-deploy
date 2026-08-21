@@ -107,6 +107,14 @@ def test_derive_compose_files_integrate():
     ]
 
 
+def test_derive_compose_files_recovery_mode():
+    config = _base_config(
+        stalwart={"recovery_mode": True},
+        proxy={"type": "caddy", "mode": "integrate"},
+    )
+    assert derive_compose_files(config)[-1] == "recovery.yml"
+
+
 def test_derive_compose_files_integrate_without_bulwark():
     config = _base_config(
         bulwark={"enabled": False},
@@ -119,6 +127,7 @@ def test_site_blocks_include_both_hosts():
     text = site_blocks(_base_config())
     assert "mail.test.example" in text
     assert "reverse_proxy stalwart:8080" in text
+    assert "proxy_protocol v2" in text
     assert "webmail.test.example" in text
     assert "reverse_proxy bulwark:3000" in text
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text
