@@ -82,35 +82,16 @@ docker exec easydeploy_caddy wget -S --timeout=5 --no-check-certificate https://
 
 If the container exited or is restarting, `docker restart stalwart` often brings it back. If `config.json` is missing under `{data_dir}/etc`, the wizard did not persist and Stalwart is in bootstrap again (`chown 2000:2000` that directory).
 
-If `/admin` is 502 but `127.0.0.1:8080` inside the Stalwart container returns HTTP 302 while `docker exec easydeploy_caddy wget http://stalwart:8080/admin` resets the connection, the HTTP listener expects **Proxy Protocol** from Docker IPs. Caddy must send it:
+If `127.0.0.1:8080` inside Stalwart returns HTTP 302 while Caddy receives
+`Connection reset by peer`, remove Proxy Protocol from this HTTP path:
 
-```
-transport http {
-    versions 1.1
-    proxy_protocol v2
-}
-```
+- `SystemSettings.proxyTrustedNetworks` must be empty.
+- The HTTP `NetworkListener.overrideProxyTrustedNetworks` must be empty.
+- `Http.useXForwarded` should be `true`.
+- Caddy should proxy plain HTTP to `stalwart:8080` without `proxy_protocol`.
 
-`apply.sh` emits that on the `:8080` reverse_proxy. Do not use `recovery_mode` for this case.
-
-If Caddy still gets `Connection reset by peer` while `127.0.0.1:8080` works, Stalwart has **auto-banned the Caddy container IP** (`172.19.0.4` on `easydeploy-net`). Unban it and allowlist Docker networks:
-
-```bash
-cd /root/stalwart-easy-deploy
-bash apply.sh --unlock-proxy
-```
-
-Or by hand with the CLI image (against localhost inside Stalwart’s network namespace):
-
-```bash
-PASS=$(awk '/RECOVERY_ADMIN_PASSWORD/{print $2}' /root/stalwart-easy-deploy/.stalwart-easy-deploy/secrets.yaml | tr -d '"')
-cli() { docker run --rm --network container:stalwart ghcr.io/stalwartlabs/cli --url http://127.0.0.1:8080 --user admin --password "$PASS" "$@"; }
-cli query BlockedIp --json --fields id,address
-cli delete BlockedIp --ids <id-of-172.19.0.4>
-cli create AllowedIp --field address=172.16.0.0/12 --field reason='easydeploy docker networks (caddy)'
-```
-
-Then open `https://mail.opencomp.eu/admin` again. Later apply runs do this automatically.
+Mail ports are published directly by Docker, so this deployment does not need
+Proxy Protocol on any listener.
 
 Confirm the live Caddyfile uses `reverse_proxy stalwart:8080` first:
 

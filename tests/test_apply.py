@@ -9,7 +9,6 @@ import yaml
 
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
-    address_is_docker_lan,
     derive_compose_files,
     ensure_data_dirs,
     load_or_create_secrets,
@@ -20,7 +19,6 @@ from scripts.apply import (
     stalwart_https_upstream,
     validate_config,
     write_compose_env,
-    _parse_cli_json_rows,
 )
 
 
@@ -91,20 +89,6 @@ def test_public_url():
     assert public_url(_base_config()) == "https://mail.test.example"
 
 
-def test_address_is_docker_lan():
-    assert address_is_docker_lan("172.19.0.4") is True
-    assert address_is_docker_lan("172.16.0.0/12") is True
-    assert address_is_docker_lan("8.8.8.8") is False
-    assert address_is_docker_lan("10.0.0.1") is False
-
-
-def test_parse_cli_json_rows():
-    text = '{"id":"abc","address":"172.19.0.4"}\n"def"\n'
-    rows = _parse_cli_json_rows(text)
-    assert rows[0]["address"] == "172.19.0.4"
-    assert rows[1]["id"] == "def"
-
-
 def test_derive_compose_files_standalone():
     assert derive_compose_files(_base_config()) == ["docker-compose.yml", "bulwark.yml", "caddy.yml"]
 
@@ -123,14 +107,6 @@ def test_derive_compose_files_integrate():
     ]
 
 
-def test_derive_compose_files_recovery_mode():
-    config = _base_config(
-        stalwart={"recovery_mode": True},
-        proxy={"type": "caddy", "mode": "integrate"},
-    )
-    assert derive_compose_files(config)[-1] == "recovery.yml"
-
-
 def test_derive_compose_files_integrate_without_bulwark():
     config = _base_config(
         bulwark={"enabled": False},
@@ -143,7 +119,7 @@ def test_site_blocks_include_both_hosts():
     text = site_blocks(_base_config())
     assert "mail.test.example" in text
     assert "reverse_proxy stalwart:8080" in text
-    assert "proxy_protocol v2" in text
+    assert "proxy_protocol" not in text
     assert "webmail.test.example" in text
     assert "reverse_proxy bulwark:3000" in text
     assert "Access-Control-Allow-Origin https://webmail.test.example" in text

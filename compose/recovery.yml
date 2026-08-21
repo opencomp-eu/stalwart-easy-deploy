@@ -1,4 +1,0 @@
-services:
-  stalwart:
-    environment:
-      STALWART_RECOVERY_MODE: "1"
