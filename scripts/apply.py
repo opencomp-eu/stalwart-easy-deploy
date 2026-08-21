@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import json
 import os
 import secrets
 import shutil
@@ -26,6 +28,8 @@ CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
+STALWART_CLI_IMAGE = "ghcr.io/stalwartlabs/cli:latest"
+DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
 STALWART_UID = 2000
 # ghcr.io/bulwarkmail/webmail runs as USER nextjs (uid 1001, gid 1001)
 BULWARK_UID = 1001
@@ -475,6 +479,129 @@ def run_compose(*args: str) -> None:
         raise
 
 
+def address_is_docker_lan(value: str) -> bool:
+    """True if an IP or CIDR sits in Docker's default 172.16.0.0/12 range."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        net = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        try:
+            ip = ipaddress.ip_address(raw.split("/")[0])
+        except ValueError:
+            return False
+        net = ipaddress.ip_network(ip)
+    return bool(net.subnet_of(DOCKER_LAN) or net.overlaps(DOCKER_LAN))
+
+
+def _parse_cli_json_rows(text: str) -> list[dict]:
+    rows: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("error:"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, str):
+            rows.append({"id": data})
+        elif isinstance(data, dict):
+            rows.append(data)
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    rows.append({"id": item})
+                elif isinstance(item, dict):
+                    rows.append(item)
+    return rows
+
+
+def _stalwart_cli(config: dict, secrets: dict, *args: str) -> subprocess.CompletedProcess:
+    user = str((config.get("stalwart") or {}).get("recovery_admin_user") or "admin").strip() or "admin"
+    password = str(secrets.get("RECOVERY_ADMIN_PASSWORD") or "")
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "container:stalwart",
+        "-e",
+        "STALWART_URL=http://127.0.0.1:8080",
+        "-e",
+        f"STALWART_USER={user}",
+        "-e",
+        f"STALWART_PASSWORD={password}",
+        STALWART_CLI_IMAGE,
+        *args,
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
+    """Unban Docker/Caddy IPs and allowlist 172.16.0.0/12 so Stalwart cannot lock Caddy out."""
+    if subprocess.run(["docker", "inspect", "stalwart"], capture_output=True).returncode != 0:
+        print("Skipping proxy allowlist: stalwart container is not running.", file=sys.stderr)
+        return
+    print("Allowlisting Docker networks in Stalwart so Caddy cannot be auto-banned…")
+    queried = _stalwart_cli(
+        config, secrets, "query", "BlockedIp", "--json", "--fields", "id,address"
+    )
+    if queried.returncode != 0:
+        print(
+            "Warning: could not query BlockedIp "
+            f"(exit {queried.returncode}): {(queried.stderr or queried.stdout).strip()[:400]}",
+            file=sys.stderr,
+        )
+        return
+    banned_ids = []
+    for row in _parse_cli_json_rows(queried.stdout):
+        addr = str(row.get("address") or "")
+        row_id = str(row.get("id") or "")
+        if row_id and address_is_docker_lan(addr):
+            banned_ids.append(row_id)
+            print(f"  removing BlockedIp {addr} ({row_id})")
+    if banned_ids:
+        deleted = _stalwart_cli(config, secrets, "delete", "BlockedIp", "--ids", *banned_ids)
+        if deleted.returncode != 0:
+            print(
+                "Warning: failed to delete BlockedIp entries: "
+                f"{(deleted.stderr or deleted.stdout).strip()[:400]}",
+                file=sys.stderr,
+            )
+    allowed = _stalwart_cli(
+        config, secrets, "query", "AllowedIp", "--json", "--fields", "id,address"
+    )
+    have_allow = False
+    if allowed.returncode == 0:
+        for row in _parse_cli_json_rows(allowed.stdout):
+            if str(row.get("address") or "") in {"172.16.0.0/12", "172.16.0.0/12".lower()}:
+                have_allow = True
+                break
+    if not have_allow:
+        created = _stalwart_cli(
+            config,
+            secrets,
+            "create",
+            "AllowedIp",
+            "--field",
+            "address=172.16.0.0/12",
+            "--field",
+            "reason=easydeploy docker networks (caddy)",
+        )
+        if created.returncode != 0:
+            print(
+                "Warning: failed to create AllowedIp 172.16.0.0/12: "
+                f"{(created.stderr or created.stdout).strip()[:400]}",
+                file=sys.stderr,
+            )
+        else:
+            print("  created AllowedIp 172.16.0.0/12")
+    else:
+        print("  AllowedIp 172.16.0.0/12 already present")
+
+
 def reconcile_runtime(skip_pull: bool = False) -> None:
     config = load_config()
     mode = proxy_mode(config)
@@ -502,6 +629,8 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
             "docker compose -p stalwart-easy-deploy -f compose/docker-compose.yml down "
             "&& docker network rm stalwart-net then re-run apply.sh"
         ) from exc
+    secrets = load_or_create_secrets(config)
+    protect_caddy_from_autoban(config, secrets)
 
 
 def print_summary(config: dict, secrets: dict) -> None:
@@ -548,10 +677,15 @@ def print_summary(config: dict, secrets: dict) -> None:
     print()
 
 
-def apply_configuration(*, skip_runtime: bool = False, skip_pull: bool = False) -> None:
+def apply_configuration(
+    *, skip_runtime: bool = False, skip_pull: bool = False, unlock_proxy: bool = False
+) -> None:
     config = load_config()
     validate_config(config)
     secrets = load_or_create_secrets(config)
+    if unlock_proxy:
+        protect_caddy_from_autoban(config, secrets)
+        return
     render_runtime_artifacts(config, secrets)
     if not skip_runtime:
         reconcile_runtime(skip_pull=skip_pull)
@@ -570,9 +704,18 @@ def main() -> None:
         action="store_true",
         help="Skip docker compose pull before up",
     )
+    parser.add_argument(
+        "--unlock-proxy",
+        action="store_true",
+        help="Unban Docker/Caddy IPs and allowlist 172.16.0.0/12; do not re-apply compose",
+    )
     args = parser.parse_args()
     try:
-        apply_configuration(skip_runtime=args.skip_runtime, skip_pull=args.skip_pull)
+        apply_configuration(
+            skip_runtime=args.skip_runtime,
+            skip_pull=args.skip_pull,
+            unlock_proxy=args.unlock_proxy,
+        )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

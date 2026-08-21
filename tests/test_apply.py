@@ -9,6 +9,7 @@ import yaml
 
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
+    address_is_docker_lan,
     derive_compose_files,
     ensure_data_dirs,
     load_or_create_secrets,
@@ -19,6 +20,7 @@ from scripts.apply import (
     stalwart_https_upstream,
     validate_config,
     write_compose_env,
+    _parse_cli_json_rows,
 )
 
 
@@ -87,6 +89,20 @@ def test_compose_project_name_is_unique():
 
 def test_public_url():
     assert public_url(_base_config()) == "https://mail.test.example"
+
+
+def test_address_is_docker_lan():
+    assert address_is_docker_lan("172.19.0.4") is True
+    assert address_is_docker_lan("172.16.0.0/12") is True
+    assert address_is_docker_lan("8.8.8.8") is False
+    assert address_is_docker_lan("10.0.0.1") is False
+
+
+def test_parse_cli_json_rows():
+    text = '{"id":"abc","address":"172.19.0.4"}\n"def"\n'
+    rows = _parse_cli_json_rows(text)
+    assert rows[0]["address"] == "172.19.0.4"
+    assert rows[1]["id"] == "def"
 
 
 def test_derive_compose_files_standalone():
