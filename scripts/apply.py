@@ -11,6 +11,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -524,7 +525,7 @@ def _jmap_ok(response: dict, call_id: str) -> dict:
     raise RuntimeError(f"no JMAP response for {call_id}")
 
 
-def _jmap(config: dict, secrets: dict, method_calls: list) -> dict:
+def _jmap(config: dict, secrets: dict, method_calls: list, *, timeout: int = 15) -> dict:
     """POST JMAP via curl already in the stalwart image (localhost, no extra container)."""
     user = str((config.get("stalwart") or {}).get("recovery_admin_user") or "admin").strip() or "admin"
     password = str(secrets.get("RECOVERY_ADMIN_PASSWORD") or "")
@@ -540,7 +541,7 @@ def _jmap(config: dict, secrets: dict, method_calls: list) -> dict:
                 "curl",
                 "-fsS",
                 "--max-time",
-                "15",
+                str(timeout),
                 "-u",
                 f"{user}:{password}",
                 "-H",
@@ -580,6 +581,84 @@ def _jmap_list(config: dict, secrets: dict, type_name: str) -> list[dict]:
     return list(_jmap_ok(got, "g").get("list") or [])
 
 
+def _is_bootstrap_error(exc: BaseException) -> bool:
+    return "bootstrap mode" in str(exc).lower()
+
+
+def bootstrap_update_fields(config: dict) -> dict:
+    """Values for x:Bootstrap/set — Caddy owns TLS, Docker captures stdout."""
+    stalwart = config.get("stalwart") or {}
+    return {
+        "serverHostname": str(stalwart.get("hostname") or "").strip(),
+        "defaultDomain": str(stalwart.get("domain") or "").strip(),
+        "requestTlsCertificate": False,
+        "generateDkimKeys": True,
+        "tracer": {
+            "@type": "Stdout",
+            "enable": True,
+            "ansi": False,
+            "buffered": True,
+        },
+    }
+
+
+def complete_bootstrap(config: dict, secrets: dict) -> bool:
+    """Finish first-boot setup without the WebUI (Caddy may already be banned)."""
+    fields = bootstrap_update_fields(config)
+    hostname = fields["serverHostname"]
+    domain = fields["defaultDomain"]
+    print(f"Stalwart is in bootstrap mode. Completing setup for {hostname} / {domain}…")
+    try:
+        payload = _jmap_ok(
+            _jmap(
+                config,
+                secrets,
+                [["x:Bootstrap/set", {"update": {"singleton": fields}}, "b"]],
+                timeout=120,
+            ),
+            "b",
+        )
+    except RuntimeError as exc:
+        print(f"Error: bootstrap failed: {exc}", file=sys.stderr)
+        return False
+    not_updated = payload.get("notUpdated") or {}
+    if not_updated:
+        print(f"Error: bootstrap rejected: {json.dumps(not_updated)[:600]}", file=sys.stderr)
+        return False
+    details = (payload.get("updated") or {}).get("singleton") or {}
+    if isinstance(details, dict):
+        user = str(details.get("username") or details.get("Username") or "").strip()
+        secret = str(details.get("secret") or details.get("Secret") or "").strip()
+        if secret:
+            secrets["STALWART_ADMIN_USER"] = user or f"admin@{domain}"
+            secrets["STALWART_ADMIN_PASSWORD"] = secret
+            save_yaml(SECRETS_PATH, secrets)
+            SECRETS_PATH.chmod(0o600)
+            print(f"  administrator {secrets['STALWART_ADMIN_USER']} saved in {SECRETS_PATH}")
+    print("  bootstrap written; restarting stalwart…")
+    return True
+
+
+def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 30) -> bool:
+    subprocess.run(["docker", "restart", "stalwart"], check=False, capture_output=True)
+    for _ in range(attempts):
+        time.sleep(2)
+        try:
+            _jmap_list(config, secrets, "BlockedIp")
+            print("  stalwart is up after bootstrap")
+            return True
+        except RuntimeError as exc:
+            if _is_bootstrap_error(exc):
+                continue
+            # Connection refused / curl errors while the process comes back.
+            continue
+    print(
+        "Warning: stalwart did not become ready after bootstrap restart.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
     """Unban Docker/Caddy IPs, allowlist 172.16.0.0/12, enable X-Forwarded-For.
 
@@ -593,13 +672,22 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
     try:
         blocked = _jmap_list(config, secrets, "BlockedIp")
     except RuntimeError as exc:
-        print(
-            f"Warning: could not query BlockedIp: {exc}. "
-            "Finish the Stalwart setup wizard, then re-run apply.sh "
-            "or apply.sh --unlock-proxy.",
-            file=sys.stderr,
-        )
-        return
+        if not _is_bootstrap_error(exc):
+            print(
+                f"Warning: could not query BlockedIp: {exc}. "
+                "Re-run apply.sh --unlock-proxy once Stalwart is reachable.",
+                file=sys.stderr,
+            )
+            return
+        if not complete_bootstrap(config, secrets):
+            return
+        if not restart_stalwart_and_wait(config, secrets):
+            return
+        try:
+            blocked = _jmap_list(config, secrets, "BlockedIp")
+        except RuntimeError as exc2:
+            print(f"Warning: could not query BlockedIp after bootstrap: {exc2}", file=sys.stderr)
+            return
     banned_ids = []
     for row in blocked:
         addr = str(row.get("address") or "")
@@ -738,11 +826,10 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"  1. Point DNS A/AAAA for {hostname} at this server.")
     if bulwark_enabled(config):
         print(f"     Also point {config['bulwark']['domain']} here.")
-    print(f"  2. Open https://{hostname}/admin and complete the Stalwart wizard.")
-    print("     Hostname and domain are already set above. Disable ACME HTTP-01")
-    print("     (Caddy terminates HTTPS). Choose console logging.")
-    print("  3. After the wizard restart, re-run apply.sh so Caddy keeps proxying")
-    print("     HTTP to stalwart:8080 (Caddy already terminates HTTPS).")
+    print("  2. apply.sh completes the Stalwart bootstrap (hostname, domain,")
+    print("     console logs, no ACME — Caddy already terminates HTTPS).")
+    print(f"  3. Open https://{hostname}/admin with the recovery admin above")
+    print("     (or STALWART_ADMIN_PASSWORD in the secrets file if printed).")
     print("     In integrate mode also run engine apply.sh --skip-kits.")
     print("  4. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI DNS zone.")
     print("  5. Mail ports 25/465/587/993/4190 are bound on the host, not via Caddy.")

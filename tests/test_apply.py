@@ -10,6 +10,7 @@ import yaml
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
     address_is_docker_lan,
+    bootstrap_update_fields,
     derive_compose_files,
     ensure_data_dirs,
     load_or_create_secrets,
@@ -109,6 +110,15 @@ def test_parse_jmap_ok():
         "q",
     )
     assert payload["ids"] == ["ban1"]
+
+
+def test_bootstrap_update_fields():
+    fields = bootstrap_update_fields(_base_config())
+    assert fields["serverHostname"] == "mail.test.example"
+    assert fields["defaultDomain"] == "test.example"
+    assert fields["requestTlsCertificate"] is False
+    assert fields["generateDkimKeys"] is True
+    assert fields["tracer"]["@type"] == "Stdout"
 
 
 def test_derive_compose_files_standalone():
@@ -337,4 +347,67 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
     assert create["create"]["docker-lan"]["address"] == "172.16.0.0/12"
     http_update = next(c[0][1] for c in calls if c[0][0] == "x:Http/set")
     assert http_update["update"]["singleton"]["useXForwarded"] is True
+
+
+def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
+    secrets_path = tmp_path / "secrets.yaml"
+    list_calls = {"n": 0}
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"] or cmd[:2] == ["docker", "restart"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        raise AssertionError(cmd)
+
+    def fake_list(_config, _secrets, type_name):
+        list_calls["n"] += 1
+        if list_calls["n"] == 1:
+            raise RuntimeError(
+                "The server is in bootstrap mode. Only the 'Bootstrap' object type "
+                "can be accessed until the bootstrap process is complete."
+            )
+        if type_name == "BlockedIp":
+            return [{"id": "ban1", "address": "172.19.0.5"}]
+        return []
+
+    def fake_jmap(_config, _secrets, method_calls, **_kwargs):
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        if method == "x:Bootstrap/set":
+            body = method_calls[0][1]["update"]["singleton"]
+            assert body["serverHostname"] == "mail.test.example"
+            assert body["requestTlsCertificate"] is False
+            return {
+                "methodResponses": [
+                    [
+                        method,
+                        {
+                            "updated": {
+                                "singleton": {
+                                    "username": "admin@test.example",
+                                    "secret": "genpw",
+                                }
+                            }
+                        },
+                        cid,
+                    ]
+                ]
+            }
+        if method == "x:BlockedIp/set":
+            return {"methodResponses": [[method, {"destroyed": ["ban1"]}, cid]]}
+        if method == "x:AllowedIp/set":
+            return {"methodResponses": [[method, {"created": {"docker-lan": {"id": "a1"}}}, cid]]}
+        if method == "x:Http/set":
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    monkeypatch.setattr("scripts.apply.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
+
+    protect_caddy_from_autoban(_base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"})
+    saved = yaml.safe_load(secrets_path.read_text())
+    assert saved["STALWART_ADMIN_PASSWORD"] == "genpw"
+    assert saved["STALWART_ADMIN_USER"] == "admin@test.example"
 
