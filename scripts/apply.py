@@ -32,9 +32,15 @@ CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
-# Docker's default user-defined bridge pool (easydeploy-net, stalwart-net).
+# Docker user-defined bridges (172.16-31) plus other container/private ranges.
 DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
 ALLOWED_DOCKER_LAN = "172.16.0.0/12"
+PRIVATE_UNBAN_NETWORKS = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
 # Stalwart scan-bans the reverse-proxy IP on the first matching exploit URL.
 # Drop those paths in Caddy so internet scanners cannot lock Caddy out.
 CADDY_SCAN_BAN_PATHS = (
@@ -485,7 +491,7 @@ def run_compose(*args: str) -> None:
 
 
 def address_is_docker_lan(value: str) -> bool:
-    """True if an IP or CIDR sits in Docker's default 172.16.0.0/12 range."""
+    """True if an IP or CIDR is in Docker/private ranges we must never ban."""
     raw = str(value or "").strip()
     if not raw:
         return False
@@ -497,7 +503,63 @@ def address_is_docker_lan(value: str) -> bool:
         except ValueError:
             return False
         net = ipaddress.ip_network(ip)
-    return bool(net.subnet_of(DOCKER_LAN) or net.overlaps(DOCKER_LAN))
+    return any(net.subnet_of(block) or net.overlaps(block) for block in PRIVATE_UNBAN_NETWORKS)
+
+
+def _row_address(row: dict) -> str:
+    """Best-effort IP/CIDR from a BlockedIp/AllowedIp JMAP object."""
+    for key in ("address", "ip"):
+        val = row.get(key)
+        if isinstance(val, dict):
+            val = val.get("address") or val.get("ip") or ""
+        text = str(val or "").strip()
+        if text:
+            return text
+    ident = str(row.get("id") or "").strip()
+    try:
+        ipaddress.ip_network(ident, strict=False)
+        return ident
+    except ValueError:
+        return ""
+
+
+def docker_allowlist_cidrs() -> list[str]:
+    """172.16.0.0/12 covers 172.16–172.31 (so 172.19.0.0/16 is included)."""
+    cidrs = [ALLOWED_DOCKER_LAN, "127.0.0.0/8"]
+    listed = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "-f",
+            "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}\n{{end}}",
+            "stalwart",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for name in listed.stdout.splitlines():
+        name = name.strip()
+        if not name:
+            continue
+        subnets = subprocess.run(
+            [
+                "docker",
+                "network",
+                "inspect",
+                "-f",
+                "{{range .IPAM.Config}}{{.Subnet}}\n{{end}}",
+                name,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for line in subnets.stdout.splitlines():
+            line = line.strip()
+            if line:
+                cidrs.append(line)
+    return list(dict.fromkeys(cidrs))
 
 
 JMAP_USING = ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"]
@@ -573,11 +635,15 @@ def _jmap(config: dict, secrets: dict, method_calls: list, *, timeout: int = 15)
 
 def _jmap_list(config: dict, secrets: dict, type_name: str) -> list[dict]:
     prefix = type_name if type_name.startswith("x:") else f"x:{type_name}"
-    queried = _jmap(config, secrets, [[f"{prefix}/query", {}, "q"]])
+    queried = _jmap(config, secrets, [[f"{prefix}/query", {"limit": 500}, "q"]])
     ids = list(_jmap_ok(queried, "q").get("ids") or [])
     if not ids:
         return []
-    got = _jmap(config, secrets, [[f"{prefix}/get", {"ids": ids}, "g"]])
+    got = _jmap(
+        config,
+        secrets,
+        [[f"{prefix}/get", {"ids": ids, "properties": ["id", "address"]}, "g"]],
+    )
     return list(_jmap_ok(got, "g").get("list") or [])
 
 
@@ -688,16 +754,22 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
         except RuntimeError as exc2:
             print(f"Warning: could not query BlockedIp after bootstrap: {exc2}", file=sys.stderr)
             return
+    if blocked:
+        print(f"  BlockedIp entries: {len(blocked)}")
+        for row in blocked:
+            print(f"    {_row_address(row) or '?'} id={row.get('id')}")
+    else:
+        print("  BlockedIp entries: none returned by JMAP")
     banned_ids = []
     for row in blocked:
-        addr = str(row.get("address") or "")
+        addr = _row_address(row)
         row_id = str(row.get("id") or "")
-        if row_id and address_is_docker_lan(addr):
+        if row_id and address_is_docker_lan(addr or row_id):
             banned_ids.append(row_id)
-            print(f"  removing BlockedIp {addr} ({row_id})")
+            print(f"  removing BlockedIp {addr or row_id} ({row_id})")
     if banned_ids:
         try:
-            _jmap_ok(
+            destroyed = _jmap_ok(
                 _jmap(
                     config,
                     secrets,
@@ -705,6 +777,9 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
                 ),
                 "d",
             )
+            not_destroyed = destroyed.get("notDestroyed") or {}
+            if not_destroyed:
+                print(f"Warning: failed to delete some BlockedIp entries: {not_destroyed}", file=sys.stderr)
         except RuntimeError as exc:
             print(f"Warning: failed to delete BlockedIp entries: {exc}", file=sys.stderr)
     try:
@@ -712,45 +787,35 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
     except RuntimeError as exc:
         print(f"Warning: could not query AllowedIp: {exc}", file=sys.stderr)
         allowed = []
-    have_allow = any(str(row.get("address") or "") == ALLOWED_DOCKER_LAN for row in allowed)
-    if not have_allow:
+    have_allow = {_row_address(row) for row in allowed}
+    create_map: dict[str, dict] = {}
+    for cidr in docker_allowlist_cidrs():
+        if cidr in have_allow:
+            print(f"  AllowedIp {cidr} already present")
+            continue
+        key = f"net{len(create_map)}"
+        create_map[key] = {
+            "address": cidr,
+            "reason": "easydeploy docker networks (caddy)",
+        }
+    if create_map:
         try:
             created = _jmap_ok(
                 _jmap(
                     config,
                     secrets,
-                    [
-                        [
-                            "x:AllowedIp/set",
-                            {
-                                "create": {
-                                    "docker-lan": {
-                                        "address": ALLOWED_DOCKER_LAN,
-                                        "reason": "easydeploy docker networks (caddy)",
-                                    }
-                                }
-                            },
-                            "c",
-                        ]
-                    ],
+                    [["x:AllowedIp/set", {"create": create_map}, "c"]],
                 ),
                 "c",
             )
             not_created = created.get("notCreated") or {}
             if not_created:
-                print(
-                    f"Warning: failed to create AllowedIp {ALLOWED_DOCKER_LAN}: {not_created}",
-                    file=sys.stderr,
-                )
+                print(f"Warning: failed to create AllowedIp: {not_created}", file=sys.stderr)
             else:
-                print(f"  created AllowedIp {ALLOWED_DOCKER_LAN}")
+                for body in create_map.values():
+                    print(f"  created AllowedIp {body['address']}")
         except RuntimeError as exc:
-            print(
-                f"Warning: failed to create AllowedIp {ALLOWED_DOCKER_LAN}: {exc}",
-                file=sys.stderr,
-            )
-    else:
-        print(f"  AllowedIp {ALLOWED_DOCKER_LAN} already present")
+            print(f"Warning: failed to create AllowedIp: {exc}", file=sys.stderr)
     try:
         _jmap_ok(
             _jmap(
@@ -763,6 +828,33 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
         print("  Http.useXForwarded=true")
     except RuntimeError as exc:
         print(f"Warning: could not set Http.useXForwarded=true: {exc}", file=sys.stderr)
+    # AllowedIp does not stop auto-ban (Stalwart still writes BlockedIp). Disable
+    # URL scan-bans so Caddy is not locked out by internet probes it forwards.
+    try:
+        _jmap_ok(
+            _jmap(
+                config,
+                secrets,
+                [
+                    [
+                        "x:Security/set",
+                        {
+                            "update": {
+                                "singleton": {
+                                    "scanBanPaths": {},
+                                    "scanBanRate": {"count": 1000000, "period": 86400000},
+                                }
+                            }
+                        },
+                        "s",
+                    ]
+                ],
+            ),
+            "s",
+        )
+        print("  Security.scanBanPaths cleared (Caddy is not treated as a scanner)")
+    except RuntimeError as exc:
+        print(f"Warning: could not update Security scan-ban: {exc}", file=sys.stderr)
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:
@@ -843,7 +935,13 @@ def apply_configuration(
     validate_config(config)
     secrets = load_or_create_secrets(config)
     if unlock_proxy:
+        render_runtime_artifacts(config, secrets)
         protect_caddy_from_autoban(config, secrets)
+        if proxy_mode(config) == "integrate":
+            print(
+                "Caddy fragment updated. Reload shared Caddy with: "
+                "easydeploy-engine apply.sh --skip-kits"
+            )
         return
     render_runtime_artifacts(config, secrets)
     if not skip_runtime:

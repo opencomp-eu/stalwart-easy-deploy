@@ -96,8 +96,8 @@ def test_public_url():
 def test_address_is_docker_lan():
     assert address_is_docker_lan("172.19.0.5") is True
     assert address_is_docker_lan("172.16.0.0/12") is True
+    assert address_is_docker_lan("10.0.0.1") is True
     assert address_is_docker_lan("8.8.8.8") is False
-    assert address_is_docker_lan("10.0.0.1") is False
 
 
 def test_parse_jmap_ok():
@@ -303,7 +303,12 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
 
     def fake_run(cmd, **_kwargs):
         if cmd[:2] == ["docker", "inspect"]:
+            fmt = " ".join(cmd)
+            if "Networks" in fmt:
+                return type("R", (), {"returncode": 0, "stdout": "easydeploy-net\n", "stderr": ""})()
             return inspect
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return type("R", (), {"returncode": 0, "stdout": "172.19.0.0/16\n", "stderr": ""})()
         raise AssertionError(cmd)
 
     def fake_jmap(_config, _secrets, method_calls):
@@ -331,9 +336,13 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
             return {"methodResponses": [[method, {"destroyed": ["ban1"]}, cid]]}
         if method == "x:AllowedIp/query":
             return {"methodResponses": [[method, {"ids": []}, cid]]}
+        if method == "x:AllowedIp/get":
+            return {"methodResponses": [[method, {"list": []}, cid]]}
         if method == "x:AllowedIp/set":
-            return {"methodResponses": [[method, {"created": {"docker-lan": {"id": "a1"}}}, cid]]}
+            return {"methodResponses": [[method, {"created": method_calls[0][1]["create"]}, cid]]}
         if method == "x:Http/set":
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Security/set":
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
         raise AssertionError(method)
 
@@ -344,9 +353,13 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
     destroy = next(c[0][1] for c in calls if c[0][0] == "x:BlockedIp/set")
     assert destroy["destroy"] == ["ban1"]
     create = next(c[0][1] for c in calls if c[0][0] == "x:AllowedIp/set")
-    assert create["create"]["docker-lan"]["address"] == "172.16.0.0/12"
+    created_addrs = {body["address"] for body in create["create"].values()}
+    assert "172.16.0.0/12" in created_addrs
+    assert "172.19.0.0/16" in created_addrs
     http_update = next(c[0][1] for c in calls if c[0][0] == "x:Http/set")
     assert http_update["update"]["singleton"]["useXForwarded"] is True
+    security = next(c[0][1] for c in calls if c[0][0] == "x:Security/set")
+    assert security["update"]["singleton"]["scanBanPaths"] == {}
 
 
 def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
@@ -355,6 +368,8 @@ def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
 
     def fake_run(cmd, **_kwargs):
         if cmd[:2] == ["docker", "inspect"] or cmd[:2] == ["docker", "restart"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if cmd[:3] == ["docker", "network", "inspect"]:
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         raise AssertionError(cmd)
 
@@ -397,6 +412,8 @@ def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
         if method == "x:AllowedIp/set":
             return {"methodResponses": [[method, {"created": {"docker-lan": {"id": "a1"}}}, cid]]}
         if method == "x:Http/set":
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Security/set":
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
         raise AssertionError(method)
 

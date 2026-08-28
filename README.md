@@ -87,9 +87,11 @@ If the container exited or is restarting, `docker restart stalwart` often brings
 If `127.0.0.1:8080` inside Stalwart returns HTTP 302 while Caddy receives
 `Connection reset by peer` (or `/admin` is 403 then goes silent), Stalwart has
 **scan-banned the Caddy container IP** on `easydeploy-net` (often `172.19.0.x`).
-That is not the Docker healthcheck (healthchecks come from `127.0.0.1`). Caddy
-is banned when Stalwart sees exploit URL probes or connections to both HTTP
-`:8080` and HTTPS `:443` from the proxy IP.
+That is not the Docker healthcheck (healthchecks come from `127.0.0.1`).
+`172.16.0.0/12` already includes `172.19.0.0/16` (Docker’s pool is 172.16–172.31).
+AllowedIp does **not** stop auto-ban: once Caddy is in BlockedIp, every request
+from it is dropped (502). Caddy is banned when Stalwart sees exploit URL probes
+or connections to both HTTP `:8080` and HTTPS `:443` from the proxy IP.
 
 Unban Docker/Caddy and allowlist the Docker bridge pool (uses `curl` already
 in the Stalwart container — no extra service):
