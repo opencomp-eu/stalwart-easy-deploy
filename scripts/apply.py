@@ -711,7 +711,7 @@ def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 30
         time.sleep(2)
         try:
             _jmap_list(config, secrets, "BlockedIp")
-            print("  stalwart is up after bootstrap")
+            print("  stalwart is up after restart")
             return True
         except RuntimeError as exc:
             if _is_bootstrap_error(exc):
@@ -723,6 +723,49 @@ def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 30
         file=sys.stderr,
     )
     return False
+
+
+def reload_stalwart_security(config: dict, secrets: dict) -> bool:
+    """Reload settings and IP caches after API writes.
+
+    Stalwart v0.16 persists registry changes without necessarily refreshing
+    the listener's in-memory settings and blocklist. ReloadSettings activates
+    the scan-ban/useXForwarded changes; ReloadBlockedIps clears stale bans and
+    activates AllowedIp changes.
+    """
+    for action, label in (
+        ("ReloadSettings", "settings"),
+        ("ReloadBlockedIps", "blocked/allowed IP caches"),
+    ):
+        try:
+            result = _jmap_ok(
+                _jmap(
+                    config,
+                    secrets,
+                    [
+                        [
+                            "x:Action/set",
+                            {
+                                "create": {
+                                    f"reload-{action}": {
+                                        "@type": action,
+                                    }
+                                }
+                            },
+                            "r",
+                        ]
+                    ],
+                ),
+                "r",
+            )
+            not_created = result.get("notCreated") or {}
+            if not_created:
+                raise RuntimeError(str(not_created))
+            print(f"  reloaded {label}")
+        except RuntimeError as exc:
+            print(f"Warning: could not reload {label}: {exc}", file=sys.stderr)
+            return False
+    return True
 
 
 def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
@@ -817,7 +860,7 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
         except RuntimeError as exc:
             print(f"Warning: failed to create AllowedIp: {exc}", file=sys.stderr)
     try:
-        _jmap_ok(
+        updated = _jmap_ok(
             _jmap(
                 config,
                 secrets,
@@ -825,13 +868,15 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
             ),
             "u",
         )
+        if updated.get("notUpdated"):
+            raise RuntimeError(str(updated["notUpdated"]))
         print("  Http.useXForwarded=true")
     except RuntimeError as exc:
         print(f"Warning: could not set Http.useXForwarded=true: {exc}", file=sys.stderr)
     # AllowedIp does not stop auto-ban (Stalwart still writes BlockedIp). Disable
     # URL scan-bans so Caddy is not locked out by internet probes it forwards.
     try:
-        _jmap_ok(
+        updated = _jmap_ok(
             _jmap(
                 config,
                 secrets,
@@ -852,9 +897,14 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
             ),
             "s",
         )
+        if updated.get("notUpdated"):
+            raise RuntimeError(str(updated["notUpdated"]))
         print("  Security.scanBanPaths cleared (Caddy is not treated as a scanner)")
     except RuntimeError as exc:
         print(f"Warning: could not update Security scan-ban: {exc}", file=sys.stderr)
+    if not reload_stalwart_security(config, secrets):
+        print("  Hot reload failed; restarting stalwart to flush stale IP caches…")
+        restart_stalwart_and_wait(config, secrets)
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:

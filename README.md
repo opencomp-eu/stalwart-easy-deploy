@@ -112,7 +112,10 @@ cd /root/easydeploy-engine && bash apply.sh --skip-kits
 `apply.sh` also sets `Http.useXForwarded=true` so later scan-bans apply to the
 real client, not Caddy. `SystemSettings.proxyTrustedNetworks` must stay empty
 (this kit does not use Proxy Protocol). Caddy proxies plain HTTP to
-`stalwart:8080`.
+`stalwart:8080`. Stalwart v0.16 keeps these settings and its active blocklist
+in memory, so `--unlock-proxy` explicitly runs the `ReloadSettings` and
+`ReloadBlockedIps` actions after updating them. If either hot reload fails, it
+restarts only the existing Stalwart container to flush the stale cache.
 
 Mail ports are published directly by Docker, so this deployment does not need
 Proxy Protocol on any listener.

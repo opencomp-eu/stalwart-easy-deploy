@@ -344,6 +344,13 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
         if method == "x:Security/set":
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            key = next(iter(method_calls[0][1]["create"]))
+            return {
+                "methodResponses": [
+                    [method, {"created": {key: {"id": f"action-{key}"}}}, cid]
+                ]
+            }
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
@@ -360,6 +367,12 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
     assert http_update["update"]["singleton"]["useXForwarded"] is True
     security = next(c[0][1] for c in calls if c[0][0] == "x:Security/set")
     assert security["update"]["singleton"]["scanBanPaths"] == {}
+    actions = [
+        next(iter(c[0][1]["create"].values()))["@type"]
+        for c in calls
+        if c[0][0] == "x:Action/set"
+    ]
+    assert actions == ["ReloadSettings", "ReloadBlockedIps"]
 
 
 def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
@@ -415,6 +428,13 @@ def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
         if method == "x:Security/set":
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            key = next(iter(method_calls[0][1]["create"]))
+            return {
+                "methodResponses": [
+                    [method, {"created": {key: {"id": f"action-{key}"}}}, cid]
+                ]
+            }
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
