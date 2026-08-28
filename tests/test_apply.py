@@ -21,7 +21,7 @@ from scripts.apply import (
     stalwart_https_upstream,
     validate_config,
     write_compose_env,
-    _parse_cli_json_rows,
+    _jmap_ok,
 )
 
 
@@ -99,11 +99,16 @@ def test_address_is_docker_lan():
     assert address_is_docker_lan("10.0.0.1") is False
 
 
-def test_parse_cli_json_rows():
-    text = '{"id":"abc","address":"172.19.0.5"}\n"def"\n'
-    rows = _parse_cli_json_rows(text)
-    assert rows[0]["address"] == "172.19.0.5"
-    assert rows[1]["id"] == "def"
+def test_parse_jmap_ok():
+    payload = _jmap_ok(
+        {
+            "methodResponses": [
+                ["x:BlockedIp/query", {"ids": ["ban1"]}, "q"],
+            ]
+        },
+        "q",
+    )
+    assert payload["ids"] == ["ban1"]
 
 
 def test_derive_compose_files_standalone():
@@ -284,45 +289,52 @@ def test_ensure_data_dirs_creates_bulwark_layout(tmp_path):
 
 def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
     inspect = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    blocked = type(
-        "R",
-        (),
-        {
-            "returncode": 0,
-            "stdout": '{"id":"ban1","address":"172.19.0.5"}\n{"id":"ban2","address":"8.8.8.8"}\n',
-            "stderr": "",
-        },
-    )()
-    deleted = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    allowed = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    created = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    forwarded = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    calls: list[tuple[str, ...]] = []
+    calls: list[list] = []
 
     def fake_run(cmd, **_kwargs):
         if cmd[:2] == ["docker", "inspect"]:
             return inspect
         raise AssertionError(cmd)
 
-    def fake_cli(_config, _secrets, *args):
-        calls.append(args)
-        if args[:2] == ("query", "BlockedIp"):
-            return blocked
-        if args[:2] == ("delete", "BlockedIp"):
-            return deleted
-        if args[:2] == ("query", "AllowedIp"):
-            return allowed
-        if args[:2] == ("create", "AllowedIp"):
-            return created
-        if args[:2] == ("update", "Http"):
-            return forwarded
-        raise AssertionError(args)
+    def fake_jmap(_config, _secrets, method_calls):
+        calls.append(method_calls)
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        if method == "x:BlockedIp/query":
+            return {"methodResponses": [[method, {"ids": ["ban1", "ban2"]}, cid]]}
+        if method == "x:BlockedIp/get":
+            return {
+                "methodResponses": [
+                    [
+                        method,
+                        {
+                            "list": [
+                                {"id": "ban1", "address": "172.19.0.5"},
+                                {"id": "ban2", "address": "8.8.8.8"},
+                            ]
+                        },
+                        cid,
+                    ]
+                ]
+            }
+        if method == "x:BlockedIp/set":
+            return {"methodResponses": [[method, {"destroyed": ["ban1"]}, cid]]}
+        if method == "x:AllowedIp/query":
+            return {"methodResponses": [[method, {"ids": []}, cid]]}
+        if method == "x:AllowedIp/set":
+            return {"methodResponses": [[method, {"created": {"docker-lan": {"id": "a1"}}}, cid]]}
+        if method == "x:Http/set":
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
-    monkeypatch.setattr("scripts.apply._stalwart_cli", fake_cli)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
 
     protect_caddy_from_autoban(_base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"})
-    assert ("delete", "BlockedIp", "--ids", "ban1") in calls
-    assert any(call[:2] == ("create", "AllowedIp") for call in calls)
-    assert ("update", "Http", "--field", "useXForwarded=true") in calls
+    destroy = next(c[0][1] for c in calls if c[0][0] == "x:BlockedIp/set")
+    assert destroy["destroy"] == ["ban1"]
+    create = next(c[0][1] for c in calls if c[0][0] == "x:AllowedIp/set")
+    assert create["create"]["docker-lan"]["address"] == "172.16.0.0/12"
+    http_update = next(c[0][1] for c in calls if c[0][0] == "x:Http/set")
+    assert http_update["update"]["singleton"]["useXForwarded"] is True
 

@@ -92,7 +92,8 @@ That is not the Docker healthcheck (healthchecks come from `127.0.0.1`). Caddy
 is banned when Stalwart sees exploit URL probes or connections to both HTTP
 `:8080` and HTTPS `:443` from the proxy IP.
 
-Unban Docker/Caddy and allowlist the Docker bridge pool:
+Unban Docker/Caddy and allowlist the Docker bridge pool (uses `curl` already
+in the Stalwart container — no extra service):
 
 ```bash
 cd /root/stalwart-easy-deploy

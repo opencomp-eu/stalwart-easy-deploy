@@ -31,7 +31,6 @@ CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
-STALWART_CLI_IMAGE = "ghcr.io/stalwartlabs/cli:v0.16"
 # Docker's default user-defined bridge pool (easydeploy-net, stalwart-net).
 DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
 ALLOWED_DOCKER_LAN = "172.16.0.0/12"
@@ -500,143 +499,182 @@ def address_is_docker_lan(value: str) -> bool:
     return bool(net.subnet_of(DOCKER_LAN) or net.overlaps(DOCKER_LAN))
 
 
-def _parse_cli_json_rows(text: str) -> list[dict]:
-    rows: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("error:"):
+JMAP_USING = ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"]
+JMAP_URLS = (
+    "http://127.0.0.1:8080/jmap",
+    "http://127.0.0.1:8080/api",
+)
+
+
+def _jmap_ok(response: dict, call_id: str) -> dict:
+    for entry in response.get("methodResponses") or []:
+        if not isinstance(entry, list) or len(entry) < 3:
             continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
+        name, payload, cid = entry[0], entry[1], entry[2]
+        if cid != call_id:
             continue
-        if isinstance(data, str):
-            rows.append({"id": data})
-        elif isinstance(data, dict):
-            rows.append(data)
-        elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, str):
-                    rows.append({"id": item})
-                elif isinstance(item, dict):
-                    rows.append(item)
-    return rows
+        if name == "error" or str(name).endswith("/error"):
+            detail = payload if isinstance(payload, dict) else {"description": payload}
+            raise RuntimeError(
+                detail.get("description") or detail.get("type") or str(payload)
+            )
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"unexpected JMAP payload for {call_id}: {payload!r}")
+        return payload
+    raise RuntimeError(f"no JMAP response for {call_id}")
 
 
-def _stalwart_cli_image(config: dict) -> str:
-    tag = str((config.get("stalwart") or {}).get("tag") or "v0.16").strip() or "v0.16"
-    if tag == "v0.16":
-        return STALWART_CLI_IMAGE
-    return f"ghcr.io/stalwartlabs/cli:{tag}"
-
-
-def _stalwart_cli(config: dict, secrets: dict, *args: str) -> subprocess.CompletedProcess:
+def _jmap(config: dict, secrets: dict, method_calls: list) -> dict:
+    """POST JMAP via curl already in the stalwart image (localhost, no extra container)."""
     user = str((config.get("stalwart") or {}).get("recovery_admin_user") or "admin").strip() or "admin"
     password = str(secrets.get("RECOVERY_ADMIN_PASSWORD") or "")
-    cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "container:stalwart",
-        "-e",
-        "STALWART_URL=http://127.0.0.1:8080",
-        "-e",
-        f"STALWART_USER={user}",
-        "-e",
-        f"STALWART_PASSWORD={password}",
-        _stalwart_cli_image(config),
-        *args,
-    ]
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    payload = json.dumps({"using": JMAP_USING, "methodCalls": method_calls})
+    last_error = "JMAP call failed"
+    for url in JMAP_URLS:
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-i",
+                "stalwart",
+                "curl",
+                "-fsS",
+                "--max-time",
+                "15",
+                "-u",
+                f"{user}:{password}",
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                "X-Forwarded-For: 127.0.0.1",
+                "-d",
+                payload,
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        body = (result.stdout or "").strip()
+        if result.returncode == 0 and body:
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                last_error = body[:400]
+                continue
+            if isinstance(data, dict):
+                return data
+            last_error = body[:400]
+            continue
+        last_error = ((result.stderr or result.stdout or "").strip() or last_error)[:400]
+    raise RuntimeError(last_error)
 
 
-def _cli_failed(result: subprocess.CompletedProcess) -> str:
-    return (result.stderr or result.stdout or "").strip()[:400]
+def _jmap_list(config: dict, secrets: dict, type_name: str) -> list[dict]:
+    prefix = type_name if type_name.startswith("x:") else f"x:{type_name}"
+    queried = _jmap(config, secrets, [[f"{prefix}/query", {}, "q"]])
+    ids = list(_jmap_ok(queried, "q").get("ids") or [])
+    if not ids:
+        return []
+    got = _jmap(config, secrets, [[f"{prefix}/get", {"ids": ids}, "g"]])
+    return list(_jmap_ok(got, "g").get("list") or [])
 
 
 def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
     """Unban Docker/Caddy IPs, allowlist 172.16.0.0/12, enable X-Forwarded-For.
 
-    Stalwart's scan auto-ban treats Caddy as the client when exploit URLs or a
-    second listener (HTTP :8080 plus HTTPS :443) arrive from the proxy IP.
-    AllowedIp does not always prevent a later auto-ban, so apply also deletes
-    existing Docker-LAN BlockedIp rows. Talks to localhost inside Stalwart's
-    network namespace so this still works while Caddy is banned.
+    Uses curl inside the existing stalwart container against 127.0.0.1 so this
+    still works while Caddy is banned. No extra container is started.
     """
     if subprocess.run(["docker", "inspect", "stalwart"], capture_output=True).returncode != 0:
         print("Skipping proxy allowlist: stalwart container is not running.", file=sys.stderr)
         return
     print("Allowlisting Docker networks in Stalwart so Caddy cannot be auto-banned…")
-    queried = _stalwart_cli(
-        config, secrets, "query", "BlockedIp", "--json", "--fields", "id,address"
-    )
-    if queried.returncode != 0:
+    try:
+        blocked = _jmap_list(config, secrets, "BlockedIp")
+    except RuntimeError as exc:
         print(
-            "Warning: could not query BlockedIp "
-            f"(exit {queried.returncode}): {_cli_failed(queried)}. "
+            f"Warning: could not query BlockedIp: {exc}. "
             "Finish the Stalwart setup wizard, then re-run apply.sh "
             "or apply.sh --unlock-proxy.",
             file=sys.stderr,
         )
         return
-    banned_ids: list[str] = []
-    for row in _parse_cli_json_rows(queried.stdout):
+    banned_ids = []
+    for row in blocked:
         addr = str(row.get("address") or "")
         row_id = str(row.get("id") or "")
         if row_id and address_is_docker_lan(addr):
             banned_ids.append(row_id)
             print(f"  removing BlockedIp {addr} ({row_id})")
     if banned_ids:
-        deleted = _stalwart_cli(
-            config, secrets, "delete", "BlockedIp", "--ids", ",".join(banned_ids)
-        )
-        if deleted.returncode != 0:
-            print(
-                f"Warning: failed to delete BlockedIp entries: {_cli_failed(deleted)}",
-                file=sys.stderr,
+        try:
+            _jmap_ok(
+                _jmap(
+                    config,
+                    secrets,
+                    [["x:BlockedIp/set", {"destroy": banned_ids}, "d"]],
+                ),
+                "d",
             )
-    allowed = _stalwart_cli(
-        config, secrets, "query", "AllowedIp", "--json", "--fields", "id,address"
-    )
-    have_allow = False
-    if allowed.returncode == 0:
-        for row in _parse_cli_json_rows(allowed.stdout):
-            if str(row.get("address") or "") == ALLOWED_DOCKER_LAN:
-                have_allow = True
-                break
+        except RuntimeError as exc:
+            print(f"Warning: failed to delete BlockedIp entries: {exc}", file=sys.stderr)
+    try:
+        allowed = _jmap_list(config, secrets, "AllowedIp")
+    except RuntimeError as exc:
+        print(f"Warning: could not query AllowedIp: {exc}", file=sys.stderr)
+        allowed = []
+    have_allow = any(str(row.get("address") or "") == ALLOWED_DOCKER_LAN for row in allowed)
     if not have_allow:
-        created = _stalwart_cli(
-            config,
-            secrets,
-            "create",
-            "AllowedIp",
-            "--field",
-            f"address={ALLOWED_DOCKER_LAN}",
-            "--field",
-            "reason=easydeploy docker networks (caddy)",
-        )
-        if created.returncode != 0:
+        try:
+            created = _jmap_ok(
+                _jmap(
+                    config,
+                    secrets,
+                    [
+                        [
+                            "x:AllowedIp/set",
+                            {
+                                "create": {
+                                    "docker-lan": {
+                                        "address": ALLOWED_DOCKER_LAN,
+                                        "reason": "easydeploy docker networks (caddy)",
+                                    }
+                                }
+                            },
+                            "c",
+                        ]
+                    ],
+                ),
+                "c",
+            )
+            not_created = created.get("notCreated") or {}
+            if not_created:
+                print(
+                    f"Warning: failed to create AllowedIp {ALLOWED_DOCKER_LAN}: {not_created}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  created AllowedIp {ALLOWED_DOCKER_LAN}")
+        except RuntimeError as exc:
             print(
-                f"Warning: failed to create AllowedIp {ALLOWED_DOCKER_LAN}: "
-                f"{_cli_failed(created)}",
+                f"Warning: failed to create AllowedIp {ALLOWED_DOCKER_LAN}: {exc}",
                 file=sys.stderr,
             )
-        else:
-            print(f"  created AllowedIp {ALLOWED_DOCKER_LAN}")
     else:
         print(f"  AllowedIp {ALLOWED_DOCKER_LAN} already present")
-    forwarded = _stalwart_cli(
-        config, secrets, "update", "Http", "--field", "useXForwarded=true"
-    )
-    if forwarded.returncode != 0:
-        print(
-            "Warning: could not set Http.useXForwarded=true: "
-            f"{_cli_failed(forwarded)}",
-            file=sys.stderr,
+    try:
+        _jmap_ok(
+            _jmap(
+                config,
+                secrets,
+                [["x:Http/set", {"update": {"singleton": {"useXForwarded": True}}}, "u"]],
+            ),
+            "u",
         )
-    else:
         print("  Http.useXForwarded=true")
+    except RuntimeError as exc:
+        print(f"Warning: could not set Http.useXForwarded=true: {exc}", file=sys.stderr)
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:
