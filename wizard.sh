@@ -6,6 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
 
+EASYDEPLOY_INVOKE_ARGS=("$@")
+clear_parent_python_env
+
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"
 NO_APPLY=0
 PROXY_MODE=""
@@ -58,18 +61,19 @@ gather_config() {
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
+	print_data_dir_hint
 
 	ask hostname "Mail hostname (MX target, e.g. mail.example.com)" "mail.example.com"
 	base_domain="$(base_domain_from_host "$hostname")"
 
 	ask domain "Primary email domain (e.g. example.com)" "$base_domain"
-	ask data_dir "Stalwart data directory" "/var/lib/stalwart"
+	ask data_dir "Stalwart data directory" "$(default_data_dir stalwart)"
 
 	echo
 	echo -e "${BOLD}  Webmail (Bulwark)${RESET}"
 	ask_yn bulwark_on "Install Bulwark webmail?" "y"
 	bulwark_domain="webmail.${domain}"
-	bulwark_data_dir="/var/lib/bulwark"
+	bulwark_data_dir="$(default_data_dir bulwark)"
 	if [[ "$bulwark_on" == "y" ]]; then
 		ask bulwark_domain "Webmail domain" "$bulwark_domain"
 		ask bulwark_data_dir "Bulwark data directory" "$bulwark_data_dir"
@@ -150,6 +154,7 @@ PY
 
 main() {
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
+	ensure_docker_group_session "${EASYDEPLOY_INVOKE_ARGS[@]}"
 	cd "${SCRIPT_DIR}"
 	gather_config
 	if [[ "${NO_APPLY}" == "1" ]]; then

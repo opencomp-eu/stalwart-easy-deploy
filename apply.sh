@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 cd "${SCRIPT_DIR}"
 
+clear_parent_python_env
+ensure_docker_group_session "$@"
+
 ensure_dependencies="false"
 python_args=()
 

@@ -15,6 +15,9 @@ from typing import Any
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
+import hostfs  # noqa: E402
+
 COMPOSE_DIR = PROJECT_ROOT / "compose"
 COMPOSE_PROJECT_NAME = "stalwart-easy-deploy"
 STATE_DIR = PROJECT_ROOT / ".stalwart-easy-deploy"
@@ -200,7 +203,7 @@ def load_or_create_secrets(config: dict | None = None) -> dict:
 
 def chown_path(path: Path, uid: int, gid: int) -> None:
     try:
-        os.chown(path, uid, gid)
+        hostfs.chown_path(path, uid, gid)
     except PermissionError:
         pass
     except OSError:
@@ -215,7 +218,7 @@ def chown_tree(path: Path, uid: int, gid: int) -> None:
 
 def ensure_data_dirs(config: dict) -> None:
     stalwart = config["stalwart"]
-    root = Path(str(stalwart["data_dir"]))
+    root = hostfs.ensure_writable_directory(stalwart["data_dir"])
     etc_dir = root / "etc"
     data_dir = root / "data"
     for path in (etc_dir, data_dir):
@@ -223,8 +226,7 @@ def ensure_data_dirs(config: dict) -> None:
         chown_path(path, STALWART_UID, STALWART_UID)
 
     if bulwark_enabled(config):
-        bulwark_root = Path(str(config["bulwark"]["data_dir"]))
-        bulwark_root.mkdir(parents=True, exist_ok=True)
+        bulwark_root = hostfs.ensure_writable_directory(config["bulwark"]["data_dir"])
         for name in ("settings", "admin", "admin-state", "telemetry"):
             (bulwark_root / name).mkdir(parents=True, exist_ok=True)
         chown_tree(bulwark_root, BULWARK_UID, BULWARK_GID)
@@ -558,7 +560,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         apply_configuration(skip_runtime=args.skip_runtime, skip_pull=args.skip_pull)
-    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+    except (FileNotFoundError, ValueError, RuntimeError, PermissionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
