@@ -77,18 +77,40 @@ First check whether Stalwart is running:
 docker ps -a --filter name=stalwart
 docker logs stalwart --tail 80
 docker exec easydeploy_caddy wget -S --timeout=5 http://stalwart:8080/admin -O /dev/null
-docker exec easydeploy_caddy wget -S --timeout=5 --no-check-certificate https://stalwart:443/admin -O /dev/null
+docker exec stalwart bash -c 'echo >/dev/tcp/127.0.0.1/8080 && echo 8080-ok'
 ```
+
+Do **not** probe both `stalwart:8080` and `stalwart:443` from Caddy. Stalwart treats
+that as a port scan and bans Caddy's IP.
 
 If the container exited or is restarting, `docker restart stalwart` often brings it back. If `config.json` is missing under `{data_dir}/etc`, the wizard did not persist and Stalwart is in bootstrap again (`chown 2000:2000` that directory).
 
 If `127.0.0.1:8080` inside Stalwart returns HTTP 302 while Caddy receives
-`Connection reset by peer`, remove Proxy Protocol from this HTTP path:
+`Connection reset by peer` (or `/admin` is 403 then goes silent), Stalwart has
+**scan-banned the Caddy container IP** on `easydeploy-net` (often `172.19.0.x`).
+That is not the Docker healthcheck (healthchecks come from `127.0.0.1`). Caddy
+is banned when Stalwart sees exploit URL probes or connections to both HTTP
+`:8080` and HTTPS `:443` from the proxy IP.
 
-- `SystemSettings.proxyTrustedNetworks` must be empty.
-- The HTTP `NetworkListener.overrideProxyTrustedNetworks` must be empty.
-- `Http.useXForwarded` should be `true`.
-- Caddy should proxy plain HTTP to `stalwart:8080` without `proxy_protocol`.
+Unban Docker/Caddy and allowlist the Docker bridge pool:
+
+```bash
+cd /root/stalwart-easy-deploy
+bash apply.sh --unlock-proxy
+```
+
+Then re-apply so Caddy drops scanner paths and talks to a single upstream:
+
+```bash
+bash apply.sh
+# integrate mode: also refresh shared Caddy
+cd /root/easydeploy-engine && bash apply.sh --skip-kits
+```
+
+`apply.sh` also sets `Http.useXForwarded=true` so later scan-bans apply to the
+real client, not Caddy. `SystemSettings.proxyTrustedNetworks` must stay empty
+(this kit does not use Proxy Protocol). Caddy proxies plain HTTP to
+`stalwart:8080`.
 
 Mail ports are published directly by Docker, so this deployment does not need
 Proxy Protocol on any listener.

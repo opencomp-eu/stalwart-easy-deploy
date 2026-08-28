@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import json
 import os
 import secrets
 import shutil
@@ -29,6 +31,16 @@ CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
+STALWART_CLI_IMAGE = "ghcr.io/stalwartlabs/cli:v0.16"
+# Docker's default user-defined bridge pool (easydeploy-net, stalwart-net).
+DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
+ALLOWED_DOCKER_LAN = "172.16.0.0/12"
+# Stalwart scan-bans the reverse-proxy IP on the first matching exploit URL.
+# Drop those paths in Caddy so internet scanners cannot lock Caddy out.
+CADDY_SCAN_BAN_PATHS = (
+    r"(?i)(\.php([/?]|$))|(\.cgi([/?]|$))|(\.asp([/?]|$))"
+    r"|/wp-|/cgi-bin|xmlrpc|joomla|wordpress|drupal|\.\./"
+)
 STALWART_UID = 2000
 # ghcr.io/bulwarkmail/webmail runs as USER nextjs (uid 1001, gid 1001)
 BULWARK_UID = 1001
@@ -245,20 +257,25 @@ CORS_ALLOW_HEADERS = (
 CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
 
 
+def _indent_block(text: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join(f"{pad}{line}" if line.strip() else line for line in text.splitlines())
+
+
 def _http_upstream(headers: str, proxy_cors: str) -> str:
     return f"""reverse_proxy stalwart:8080 {{
-        {headers}{proxy_cors}
-    }}"""
+    {headers}{proxy_cors}
+}}"""
 
 
 def _https_upstream(hostname: str, headers: str, proxy_cors: str) -> str:
     return f"""reverse_proxy https://stalwart:443 {{
-        {headers}{proxy_cors}
-        transport http {{
-            tls_insecure_skip_verify
-            tls_server_name {hostname}
-        }}
-    }}"""
+    {headers}{proxy_cors}
+    transport http {{
+        tls_insecure_skip_verify
+        tls_server_name {hostname}
+    }}
+}}"""
 
 
 def stalwart_caddy_block(
@@ -291,27 +308,27 @@ def stalwart_caddy_block(
         # Do not delete Access-Control-Allow-Origin here after setting it —
         # Caddy's header_down delete wins over a later set of the same name.
         proxy_cors = """
-        header_down -Access-Control-Allow-Origin
-        header_down -Access-Control-Allow-Credentials
-        header_down -Access-Control-Allow-Methods
-        header_down -Access-Control-Allow-Headers
-        header_down -Access-Control-Expose-Headers"""
-    http_up = _http_upstream(headers, proxy_cors)
-    https_up = _https_upstream(hostname, headers, proxy_cors)
-    # Caddy terminates public TLS. Prefer HTTP :8080; fail over to :443.
-    if https_upstream:
-        primary, fallback = https_up, http_up
-    else:
-        primary, fallback = http_up, https_up
-    fallback_indented = "\n".join(
-        f"        {line}" if line.strip() else line for line in fallback.splitlines()
+    header_down -Access-Control-Allow-Origin
+    header_down -Access-Control-Allow-Credentials
+    header_down -Access-Control-Allow-Methods
+    header_down -Access-Control-Allow-Headers
+    header_down -Access-Control-Expose-Headers"""
+    primary = (
+        _https_upstream(hostname, headers, proxy_cors)
+        if https_upstream
+        else _http_upstream(headers, proxy_cors)
     )
+    # One upstream only. Failing over 8080↔443 from Caddy looks like a port
+    # scan and Stalwart bans the proxy IP (then /admin goes silent).
+    proxy_indented = _indent_block(primary, 8)
     return f"""# stalwart-easy-deploy — mail admin + JMAP
 {hostname} {{{cors}
-    {primary}
-
-    handle_errors 502 503 {{
-{fallback_indented}
+    @scan_ban path_regexp {CADDY_SCAN_BAN_PATHS}
+    handle @scan_ban {{
+        respond 404
+    }}
+    handle {{
+{proxy_indented}
     }}
     encode gzip
     log
@@ -467,6 +484,161 @@ def run_compose(*args: str) -> None:
         raise
 
 
+def address_is_docker_lan(value: str) -> bool:
+    """True if an IP or CIDR sits in Docker's default 172.16.0.0/12 range."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        net = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        try:
+            ip = ipaddress.ip_address(raw.split("/")[0])
+        except ValueError:
+            return False
+        net = ipaddress.ip_network(ip)
+    return bool(net.subnet_of(DOCKER_LAN) or net.overlaps(DOCKER_LAN))
+
+
+def _parse_cli_json_rows(text: str) -> list[dict]:
+    rows: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("error:"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, str):
+            rows.append({"id": data})
+        elif isinstance(data, dict):
+            rows.append(data)
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    rows.append({"id": item})
+                elif isinstance(item, dict):
+                    rows.append(item)
+    return rows
+
+
+def _stalwart_cli_image(config: dict) -> str:
+    tag = str((config.get("stalwart") or {}).get("tag") or "v0.16").strip() or "v0.16"
+    if tag == "v0.16":
+        return STALWART_CLI_IMAGE
+    return f"ghcr.io/stalwartlabs/cli:{tag}"
+
+
+def _stalwart_cli(config: dict, secrets: dict, *args: str) -> subprocess.CompletedProcess:
+    user = str((config.get("stalwart") or {}).get("recovery_admin_user") or "admin").strip() or "admin"
+    password = str(secrets.get("RECOVERY_ADMIN_PASSWORD") or "")
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "container:stalwart",
+        "-e",
+        "STALWART_URL=http://127.0.0.1:8080",
+        "-e",
+        f"STALWART_USER={user}",
+        "-e",
+        f"STALWART_PASSWORD={password}",
+        _stalwart_cli_image(config),
+        *args,
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def _cli_failed(result: subprocess.CompletedProcess) -> str:
+    return (result.stderr or result.stdout or "").strip()[:400]
+
+
+def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
+    """Unban Docker/Caddy IPs, allowlist 172.16.0.0/12, enable X-Forwarded-For.
+
+    Stalwart's scan auto-ban treats Caddy as the client when exploit URLs or a
+    second listener (HTTP :8080 plus HTTPS :443) arrive from the proxy IP.
+    AllowedIp does not always prevent a later auto-ban, so apply also deletes
+    existing Docker-LAN BlockedIp rows. Talks to localhost inside Stalwart's
+    network namespace so this still works while Caddy is banned.
+    """
+    if subprocess.run(["docker", "inspect", "stalwart"], capture_output=True).returncode != 0:
+        print("Skipping proxy allowlist: stalwart container is not running.", file=sys.stderr)
+        return
+    print("Allowlisting Docker networks in Stalwart so Caddy cannot be auto-banned…")
+    queried = _stalwart_cli(
+        config, secrets, "query", "BlockedIp", "--json", "--fields", "id,address"
+    )
+    if queried.returncode != 0:
+        print(
+            "Warning: could not query BlockedIp "
+            f"(exit {queried.returncode}): {_cli_failed(queried)}. "
+            "Finish the Stalwart setup wizard, then re-run apply.sh "
+            "or apply.sh --unlock-proxy.",
+            file=sys.stderr,
+        )
+        return
+    banned_ids: list[str] = []
+    for row in _parse_cli_json_rows(queried.stdout):
+        addr = str(row.get("address") or "")
+        row_id = str(row.get("id") or "")
+        if row_id and address_is_docker_lan(addr):
+            banned_ids.append(row_id)
+            print(f"  removing BlockedIp {addr} ({row_id})")
+    if banned_ids:
+        deleted = _stalwart_cli(
+            config, secrets, "delete", "BlockedIp", "--ids", ",".join(banned_ids)
+        )
+        if deleted.returncode != 0:
+            print(
+                f"Warning: failed to delete BlockedIp entries: {_cli_failed(deleted)}",
+                file=sys.stderr,
+            )
+    allowed = _stalwart_cli(
+        config, secrets, "query", "AllowedIp", "--json", "--fields", "id,address"
+    )
+    have_allow = False
+    if allowed.returncode == 0:
+        for row in _parse_cli_json_rows(allowed.stdout):
+            if str(row.get("address") or "") == ALLOWED_DOCKER_LAN:
+                have_allow = True
+                break
+    if not have_allow:
+        created = _stalwart_cli(
+            config,
+            secrets,
+            "create",
+            "AllowedIp",
+            "--field",
+            f"address={ALLOWED_DOCKER_LAN}",
+            "--field",
+            "reason=easydeploy docker networks (caddy)",
+        )
+        if created.returncode != 0:
+            print(
+                f"Warning: failed to create AllowedIp {ALLOWED_DOCKER_LAN}: "
+                f"{_cli_failed(created)}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  created AllowedIp {ALLOWED_DOCKER_LAN}")
+    else:
+        print(f"  AllowedIp {ALLOWED_DOCKER_LAN} already present")
+    forwarded = _stalwart_cli(
+        config, secrets, "update", "Http", "--field", "useXForwarded=true"
+    )
+    if forwarded.returncode != 0:
+        print(
+            "Warning: could not set Http.useXForwarded=true: "
+            f"{_cli_failed(forwarded)}",
+            file=sys.stderr,
+        )
+    else:
+        print("  Http.useXForwarded=true")
+
+
 def reconcile_runtime(skip_pull: bool = False) -> None:
     config = load_config()
     mode = proxy_mode(config)
@@ -494,6 +666,10 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
             "docker compose -p stalwart-easy-deploy -f compose/docker-compose.yml down "
             "&& docker network rm stalwart-net then re-run apply.sh"
         ) from exc
+    secrets = load_or_create_secrets(config)
+    protect_caddy_from_autoban(config, secrets)
+
+
 def print_summary(config: dict, secrets: dict) -> None:
     stalwart = config["stalwart"]
     hostname = stalwart["hostname"]
@@ -535,10 +711,15 @@ def print_summary(config: dict, secrets: dict) -> None:
     print()
 
 
-def apply_configuration(*, skip_runtime: bool = False, skip_pull: bool = False) -> None:
+def apply_configuration(
+    *, skip_runtime: bool = False, skip_pull: bool = False, unlock_proxy: bool = False
+) -> None:
     config = load_config()
     validate_config(config)
     secrets = load_or_create_secrets(config)
+    if unlock_proxy:
+        protect_caddy_from_autoban(config, secrets)
+        return
     render_runtime_artifacts(config, secrets)
     if not skip_runtime:
         reconcile_runtime(skip_pull=skip_pull)
@@ -557,9 +738,18 @@ def main() -> None:
         action="store_true",
         help="Skip docker compose pull before up",
     )
+    parser.add_argument(
+        "--unlock-proxy",
+        action="store_true",
+        help="Unban Docker/Caddy IPs and allowlist 172.16.0.0/12; do not re-apply compose",
+    )
     args = parser.parse_args()
     try:
-        apply_configuration(skip_runtime=args.skip_runtime, skip_pull=args.skip_pull)
+        apply_configuration(
+            skip_runtime=args.skip_runtime,
+            skip_pull=args.skip_pull,
+            unlock_proxy=args.unlock_proxy,
+        )
     except (FileNotFoundError, ValueError, RuntimeError, PermissionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

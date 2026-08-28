@@ -9,9 +9,11 @@ import yaml
 
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
+    address_is_docker_lan,
     derive_compose_files,
     ensure_data_dirs,
     load_or_create_secrets,
+    protect_caddy_from_autoban,
     public_url,
     render_caddyfile,
     render_template,
@@ -19,6 +21,7 @@ from scripts.apply import (
     stalwart_https_upstream,
     validate_config,
     write_compose_env,
+    _parse_cli_json_rows,
 )
 
 
@@ -89,6 +92,20 @@ def test_public_url():
     assert public_url(_base_config()) == "https://mail.test.example"
 
 
+def test_address_is_docker_lan():
+    assert address_is_docker_lan("172.19.0.5") is True
+    assert address_is_docker_lan("172.16.0.0/12") is True
+    assert address_is_docker_lan("8.8.8.8") is False
+    assert address_is_docker_lan("10.0.0.1") is False
+
+
+def test_parse_cli_json_rows():
+    text = '{"id":"abc","address":"172.19.0.5"}\n"def"\n'
+    rows = _parse_cli_json_rows(text)
+    assert rows[0]["address"] == "172.19.0.5"
+    assert rows[1]["id"] == "def"
+
+
 def test_derive_compose_files_standalone():
     assert derive_compose_files(_base_config()) == ["docker-compose.yml", "bulwark.yml", "caddy.yml"]
 
@@ -127,6 +144,10 @@ def test_site_blocks_include_both_hosts():
     assert "defer" in text
     assert "Access-Control-Expose-Headers *" not in text
     assert "header_down Access-Control-Allow-Origin " not in text
+    assert "@scan_ban" in text
+    assert "handle @scan_ban" in text
+    assert "handle_errors" not in text
+    assert "https://stalwart:443" not in text
 
 
 def test_site_blocks_stay_on_http_after_wizard(tmp_path):
@@ -137,14 +158,17 @@ def test_site_blocks_stay_on_http_after_wizard(tmp_path):
     assert stalwart_https_upstream(config) is False
     text = site_blocks(config)
     assert "reverse_proxy stalwart:8080" in text
-    assert text.index("stalwart:8080") < text.index("handle_errors 502 503")
-    assert text.index("handle_errors 502 503") < text.index("https://stalwart:443")
+    assert "handle_errors" not in text
+    assert "https://stalwart:443" not in text
 
 
 def test_caddy_upstream_override_https():
     config = _base_config(stalwart={"caddy_upstream": "https"})
     assert stalwart_https_upstream(config) is True
-    assert "https://stalwart:443" in site_blocks(config)
+    text = site_blocks(config)
+    assert "https://stalwart:443" in text
+    assert "stalwart:8080" not in text
+    assert "handle_errors" not in text
 
 
 def test_caddy_upstream_override_http(tmp_path):
@@ -155,9 +179,8 @@ def test_caddy_upstream_override_http(tmp_path):
     assert stalwart_https_upstream(config) is False
     text = site_blocks(config)
     assert "reverse_proxy stalwart:8080" in text
-    assert "handle_errors 502 503" in text
-    assert text.index("stalwart:8080") < text.index("handle_errors 502 503")
-    assert text.index("handle_errors 502 503") < text.index("https://stalwart:443")
+    assert "handle_errors" not in text
+    assert "https://stalwart:443" not in text
 
 
 def test_site_blocks_omit_bulwark_when_disabled():
@@ -257,4 +280,49 @@ def test_ensure_data_dirs_creates_bulwark_layout(tmp_path):
     assert (tmp_path / "stalwart" / "data").is_dir()
     for name in ("settings", "admin", "admin-state", "telemetry"):
         assert (tmp_path / "bulwark" / name).is_dir()
+
+
+def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
+    inspect = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    blocked = type(
+        "R",
+        (),
+        {
+            "returncode": 0,
+            "stdout": '{"id":"ban1","address":"172.19.0.5"}\n{"id":"ban2","address":"8.8.8.8"}\n',
+            "stderr": "",
+        },
+    )()
+    deleted = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    allowed = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    created = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    forwarded = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return inspect
+        raise AssertionError(cmd)
+
+    def fake_cli(_config, _secrets, *args):
+        calls.append(args)
+        if args[:2] == ("query", "BlockedIp"):
+            return blocked
+        if args[:2] == ("delete", "BlockedIp"):
+            return deleted
+        if args[:2] == ("query", "AllowedIp"):
+            return allowed
+        if args[:2] == ("create", "AllowedIp"):
+            return created
+        if args[:2] == ("update", "Http"):
+            return forwarded
+        raise AssertionError(args)
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    monkeypatch.setattr("scripts.apply._stalwart_cli", fake_cli)
+
+    protect_caddy_from_autoban(_base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"})
+    assert ("delete", "BlockedIp", "--ids", "ban1") in calls
+    assert any(call[:2] == ("create", "AllowedIp") for call in calls)
+    assert ("update", "Http", "--field", "useXForwarded=true") in calls
 
