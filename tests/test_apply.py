@@ -10,7 +10,10 @@ import yaml
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
     address_is_docker_lan,
+    apply_engine_identity_sidecar,
+    apply_kanidm_directory,
     bootstrap_update_fields,
+    build_ldap_directory,
     derive_compose_files,
     ensure_data_dirs,
     load_or_create_secrets,
@@ -447,4 +450,106 @@ def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
     saved = yaml.safe_load(secrets_path.read_text())
     assert saved["STALWART_ADMIN_PASSWORD"] == "genpw"
     assert saved["STALWART_ADMIN_USER"] == "admin@test.example"
+
+
+def test_apply_engine_identity_sidecar_fills_kanidm(tmp_path):
+    sidecar = tmp_path / "identity-provider.yaml"
+    sidecar.write_text(
+        yaml.safe_dump(
+            {
+                "provider": "kanidm",
+                "domain": "idm.test.example",
+                "ldap": {
+                    "url": "ldaps://kanidm:3636",
+                    "base_dn": "dc=idm,dc=test,dc=example",
+                    "bind_dn": "dn=token",
+                    "bind_secret": "ldap-token",
+                },
+                "oidc": {
+                    "issuer_url": "https://idm.test.example/oauth2/openid/stalwart",
+                    "client_id": "stalwart",
+                },
+            }
+        )
+    )
+    config = {"identity": {}}
+    identity = apply_engine_identity_sidecar(config, sidecar)
+    assert identity["provider"] == "kanidm"
+    assert identity["ldap"]["base_dn"] == "dc=idm,dc=test,dc=example"
+    assert identity["ldap"]["bind_secret"] == "ldap-token"
+
+
+def test_apply_engine_identity_sidecar_respects_external_provider(tmp_path):
+    sidecar = tmp_path / "identity-provider.yaml"
+    sidecar.write_text(yaml.safe_dump({"provider": "kanidm", "domain": "idm.test.example"}))
+    config = {"identity": {"provider": "internal"}}
+    identity = apply_engine_identity_sidecar(config, sidecar)
+    assert identity["provider"] == "internal"
+    assert "ldap" not in identity
+
+
+def test_build_ldap_directory_payload():
+    identity = {
+        "provider": "kanidm",
+        "ldap": {
+            "url": "ldaps://kanidm:3636",
+            "base_dn": "dc=idm,dc=test,dc=example",
+            "bind_secret": "token",
+        },
+    }
+    payload = build_ldap_directory(identity, {})
+    assert payload is not None
+    assert payload["@type"] == "Ldap"
+    assert payload["baseDn"] == "dc=idm,dc=test,dc=example"
+    assert payload["bindSecret"] == {"@type": "Value", "secret": "token"}
+    assert payload["bindAuthentication"] is True
+    assert payload["filterLogin"].startswith("(&(objectclass=account)")
+
+
+def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):
+    sidecar = tmp_path / "identity-provider.yaml"
+    sidecar.write_text(
+        yaml.safe_dump(
+            {
+                "provider": "kanidm",
+                "ldap": {
+                    "url": "ldaps://kanidm:3636",
+                    "base_dn": "dc=idm,dc=test,dc=example",
+                    "bind_secret": "token",
+                },
+            }
+        )
+    )
+    secrets_path = tmp_path / "secrets.yaml"
+    calls: list[str] = []
+
+    def fake_list(_config, _secrets, type_name):
+        assert type_name == "Directory"
+        return []
+
+    def fake_jmap(_config, _secrets, method_calls, **_kwargs):
+        method = method_calls[0][0]
+        calls.append(method)
+        cid = method_calls[0][2]
+        if method == "x:Directory/set":
+            return {
+                "methodResponses": [
+                    [method, {"created": {"kanidm": {"id": "dir-kanidm"}}}, cid]
+                ]
+            }
+        if method == "x:Authentication/set":
+            assert method_calls[0][1]["update"]["singleton"]["directoryId"] == "dir-kanidm"
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
+    monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
+    monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+
+    secrets: dict = {}
+    apply_kanidm_directory(_base_config(), secrets)
+    assert "x:Directory/set" in calls
+    assert "x:Authentication/set" in calls
+    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
 

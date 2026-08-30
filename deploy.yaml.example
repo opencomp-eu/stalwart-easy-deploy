@@ -29,6 +29,11 @@ ports:
   imaps: 993
   sieve: 4190
 
+# identity.provider: kanidm — written by easydeploy-engine. IMAP/SMTP bind Kanidm LDAP.
+# Set identity.managed: false to keep Stalwart's internal directory.
+# identity:
+#   provider: kanidm
+
 proxy:
   type: caddy
   # standalone — this kit runs its own Caddy on :443 (single-service VPS)

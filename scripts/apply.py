@@ -907,6 +907,167 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
         restart_stalwart_and_wait(config, secrets)
 
 
+IDENTITY_SIDECAR = INTEGRATION_DIR / "identity-provider.yaml"
+KANIDM_DIRECTORY_DESCRIPTION = "Kanidm"
+
+
+def managed_is_false(section: dict | None) -> bool:
+    value = (section or {}).get("managed")
+    if value is False:
+        return True
+    return str(value or "").strip().lower() in {"false", "no", "0"}
+
+
+def apply_engine_identity_sidecar(config: dict, sidecar_path: Path | None = None) -> dict:
+    """Merge Kanidm identity settings from the engine sidecar. Operator deploy.yaml wins."""
+    path = sidecar_path or IDENTITY_SIDECAR
+    identity = config.get("identity")
+    if not isinstance(identity, dict):
+        identity = {}
+        config["identity"] = identity
+    if managed_is_false(identity):
+        return identity
+    existing_provider = str(identity.get("provider") or "").strip().lower()
+    if existing_provider and existing_provider != "kanidm":
+        return identity
+    if path is None or not path.is_file():
+        return identity
+    sidecar = load_yaml(path)
+    for key, value in sidecar.items():
+        if key == "managed":
+            continue
+        if key in {"ldap", "oidc"} and isinstance(value, dict):
+            section = identity.setdefault(key, {})
+            if not isinstance(section, dict):
+                identity[key] = dict(value)
+                continue
+            for nested_key, nested_value in value.items():
+                if section.get(nested_key) in (None, ""):
+                    section[nested_key] = nested_value
+            continue
+        if identity.get(key) in (None, ""):
+            identity[key] = value
+    identity.setdefault("provider", "kanidm")
+    return identity
+
+
+def _sibling_kanidm_ldap_token() -> str:
+    secrets_path = PROJECT_ROOT.parent / "kanidm-easy-deploy" / ".kanidm-easy-deploy" / "secrets.yaml"
+    if not secrets_path.is_file():
+        return ""
+    return str(load_yaml(secrets_path).get("LDAP_TOKEN") or "").strip()
+
+
+def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
+    ldap = identity.get("ldap") if isinstance(identity.get("ldap"), dict) else {}
+    bind_secret = str(
+        ldap.get("bind_secret") or secrets.get("LDAP_TOKEN") or _sibling_kanidm_ldap_token() or ""
+    ).strip()
+    base_dn = str(ldap.get("base_dn") or "").strip()
+    if not bind_secret or not base_dn:
+        return None
+    return {
+        "@type": "Ldap",
+        "description": KANIDM_DIRECTORY_DESCRIPTION,
+        "url": str(ldap.get("url") or "ldaps://kanidm:3636").strip(),
+        "baseDn": base_dn,
+        "bindDn": str(ldap.get("bind_dn") or "dn=token").strip(),
+        "bindSecret": {"@type": "Value", "secret": bind_secret},
+        "bindAuthentication": True,
+        "allowInvalidCerts": True,
+        "useTls": True,
+        "filterLogin": str(
+            ldap.get("filter_login") or "(&(objectclass=account)(|(name=?)(mail=?)))"
+        ),
+        "filterMailbox": str(ldap.get("filter_mailbox") or "(&(objectclass=account)(mail=?))"),
+        "attrEmail": {str(ldap.get("attr_email") or "mail"): True},
+        "attrDescription": {str(ldap.get("attr_description") or "displayname"): True},
+        "attrMemberOf": {str(ldap.get("attr_member_of") or "memberof"): True},
+        "attrClass": {"objectclass": True},
+        "groupClass": str(ldap.get("group_class") or "group"),
+    }
+
+
+def apply_kanidm_directory(config: dict, secrets: dict) -> None:
+    """Point Stalwart IMAP/SMTP identity at Kanidm LDAP when the engine sidecar is present."""
+    identity = apply_engine_identity_sidecar(config)
+    if str(identity.get("provider") or "").strip().lower() != "kanidm":
+        return
+    if managed_is_false(identity):
+        return
+    payload = build_ldap_directory(identity, secrets)
+    if payload is None:
+        print(
+            "Warning: Kanidm identity sidecar has no LDAP bind secret or base DN yet. "
+            "Re-apply kanidm-easy-deploy, then re-apply Stalwart.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        directories = _jmap_list(config, secrets, "Directory")
+    except RuntimeError as exc:
+        print(f"Warning: could not list Stalwart directories: {exc}", file=sys.stderr)
+        return
+    existing = next(
+        (
+            item
+            for item in directories
+            if str(item.get("description") or "") == KANIDM_DIRECTORY_DESCRIPTION
+        ),
+        None,
+    )
+    try:
+        if existing and existing.get("id"):
+            directory_id = str(existing["id"])
+            updated = _jmap_ok(
+                _jmap(
+                    config,
+                    secrets,
+                    [["x:Directory/set", {"update": {directory_id: payload}}, "d"]],
+                ),
+                "d",
+            )
+            if updated.get("notUpdated"):
+                raise RuntimeError(str(updated["notUpdated"]))
+        else:
+            created = _jmap_ok(
+                _jmap(
+                    config,
+                    secrets,
+                    [["x:Directory/set", {"create": {"kanidm": payload}}, "d"]],
+                ),
+                "d",
+            )
+            if created.get("notCreated"):
+                raise RuntimeError(str(created["notCreated"]))
+            created_obj = (created.get("created") or {}).get("kanidm") or {}
+            directory_id = str(created_obj.get("id") or "")
+            if not directory_id:
+                raise RuntimeError("Directory/set did not return an id")
+        auth = _jmap_ok(
+            _jmap(
+                config,
+                secrets,
+                [
+                    [
+                        "x:Authentication/set",
+                        {"update": {"singleton": {"directoryId": directory_id}}},
+                        "a",
+                    ]
+                ],
+            ),
+            "a",
+        )
+        if auth.get("notUpdated"):
+            raise RuntimeError(str(auth["notUpdated"]))
+    except RuntimeError as exc:
+        print(f"Warning: could not apply Kanidm LDAP directory: {exc}", file=sys.stderr)
+        return
+    secrets["KANIDM_DIRECTORY_ID"] = directory_id
+    save_yaml(SECRETS_PATH, secrets)
+    print(f"  Stalwart directory is Kanidm LDAP ({payload['url']}, {payload['baseDn']})")
+
+
 def reconcile_runtime(skip_pull: bool = False) -> None:
     config = load_config()
     mode = proxy_mode(config)
@@ -936,9 +1097,11 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
         ) from exc
     secrets = load_or_create_secrets(config)
     protect_caddy_from_autoban(config, secrets)
+    apply_kanidm_directory(config, secrets)
 
 
 def print_summary(config: dict, secrets: dict) -> None:
+    apply_engine_identity_sidecar(config)
     stalwart = config["stalwart"]
     hostname = stalwart["hostname"]
     domain = stalwart["domain"]
@@ -956,6 +1119,9 @@ def print_summary(config: dict, secrets: dict) -> None:
         print("Caddy upstream:  http://stalwart:8080 (Caddy terminates TLS)")
     print(f"Secrets file:    {SECRETS_PATH}")
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
+    identity = config.get("identity") if isinstance(config.get("identity"), dict) else {}
+    if str(identity.get("provider") or "").strip().lower() == "kanidm":
+        print("Identity:        Kanidm LDAP (IMAP/SMTP) + OIDC client for tokens/webmail")
     if bulwark_enabled(config):
         print(f"Webmail:         https://{config['bulwark']['domain']}")
     if proxy_mode(config) == "integrate":

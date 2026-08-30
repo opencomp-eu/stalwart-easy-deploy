@@ -40,7 +40,7 @@ After the stack is up:
 3. Re-run `bash apply.sh` and, in integrate mode, `easydeploy-engine` `apply.sh --skip-kits` so Caddy keeps proxying HTTP to `stalwart:8080`.
 4. Open `https://mail.example.com/admin` with the **recovery admin** from `.stalwart-easy-deploy/secrets.yaml` (or `STALWART_ADMIN_PASSWORD` if bootstrap printed one).
 5. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI (Management → Domains → DNS zone file).
-6. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart.
+6. Sign in to Bulwark at `https://webmail.example.com` with a mailbox created in Stalwart, or with a Kanidm user when the engine wired LDAP identity.
 
 **Bulwark must use a different hostname** than Stalwart (`webmail.example.com` vs `mail.example.com`). Both apps serve `/api` and OAuth on the same paths, so they cannot share a host.
 
@@ -48,6 +48,7 @@ After the stack is up:
 
 - **`deploy.yaml`** — operator settings (hostname, domains, image tags, ports).
 - **`.stalwart-easy-deploy/secrets.yaml`** — generated recovery password and Bulwark session secret (do not commit).
+- **Kanidm** (via easydeploy-engine) is the organisation directory. IMAP/SMTP authenticate against Kanidm LDAP; do not create parallel mailboxes in Stalwart for those users.
 - **`/var/lib/stalwart`** (default) — Stalwart config (`etc/`) and mail data (`data/`).
 - **`/var/lib/bulwark`** (default) — Bulwark settings, admin config, and telemetry.
 
