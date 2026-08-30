@@ -642,7 +642,7 @@ def _jmap_list(config: dict, secrets: dict, type_name: str) -> list[dict]:
     got = _jmap(
         config,
         secrets,
-        [[f"{prefix}/get", {"ids": ids, "properties": ["id", "address"]}, "g"]],
+        [[f"{prefix}/get", {"ids": ids}, "g"]],
     )
     return list(_jmap_ok(got, "g").get("list") or [])
 
@@ -1013,6 +1013,39 @@ def build_oidc_directory(identity: dict) -> dict | None:
     return payload
 
 
+def _directory_matches(item: dict, payload: dict) -> bool:
+    wanted = str(payload.get("description") or "").strip()
+    have = str(item.get("description") or "").strip()
+    if wanted and have == wanted:
+        return True
+    kind = str(payload.get("@type") or "").strip().lower()
+    if kind == "ldap":
+        url = str(item.get("url") or item.get("issuerUrl") or "")
+        target = str(payload.get("url") or "")
+        return bool(target) and (url == target or "kanidm:3636" in url)
+    if kind == "oidc":
+        issuer = str(item.get("issuerUrl") or item.get("url") or "")
+        target = str(payload.get("issuerUrl") or "")
+        return bool(target) and issuer == target
+    return False
+
+
+def _destroy_directories(config: dict, secrets: dict, ids: list[str]) -> None:
+    leftover = [item for item in ids if item]
+    if not leftover:
+        return
+    destroyed = _jmap_ok(
+        _jmap(
+            config,
+            secrets,
+            [["x:Directory/set", {"destroy": leftover}, "d"]],
+        ),
+        "d",
+    )
+    if destroyed.get("notDestroyed"):
+        raise RuntimeError(str(destroyed["notDestroyed"]))
+
+
 def _upsert_directory(
     config: dict,
     secrets: dict,
@@ -1021,10 +1054,9 @@ def _upsert_directory(
     payload: dict,
     create_key: str,
 ) -> str:
-    existing = next(
-        (item for item in directories if str(item.get("description") or "") == description),
-        None,
-    )
+    matches = [item for item in directories if isinstance(item, dict) and _directory_matches(item, payload)]
+    existing = next((item for item in matches if item.get("id")), None)
+    extras = [str(item["id"]) for item in matches[1:] if item.get("id")]
     if existing and existing.get("id"):
         directory_id = str(existing["id"])
         updated = _jmap_ok(
@@ -1037,6 +1069,9 @@ def _upsert_directory(
         )
         if updated.get("notUpdated"):
             raise RuntimeError(str(updated["notUpdated"]))
+        if extras:
+            _destroy_directories(config, secrets, extras)
+            print(f"  Removed {len(extras)} duplicate Stalwart director{'y' if len(extras) == 1 else 'ies'}")
         return directory_id
     created = _jmap_ok(
         _jmap(
@@ -1052,6 +1087,8 @@ def _upsert_directory(
     directory_id = str(created_obj.get("id") or "")
     if not directory_id:
         raise RuntimeError("Directory/set did not return an id")
+    if extras:
+        _destroy_directories(config, secrets, extras)
     return directory_id
 
 
@@ -1088,13 +1125,13 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
                 oidc_payload,
                 "kanidmOidc",
             )
-        prefer = str(identity.get("auth_directory") or "").strip().lower()
-        if prefer == "ldap" or not oidc_id:
-            directory_id = ldap_id
-            kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
-        else:
+        prefer = str(identity.get("auth_directory") or "ldap").strip().lower()
+        if prefer == "oidc" and oidc_id:
             directory_id = oidc_id
             kind = f"OIDC ({oidc_payload['issuerUrl']})"
+        else:
+            directory_id = ldap_id
+            kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
         auth = _jmap_ok(
             _jmap(
                 config,

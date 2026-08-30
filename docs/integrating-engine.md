@@ -27,8 +27,8 @@ Standalone mode (`mode: standalone`, default) keeps the local `stalwart_caddy` c
 
 ## Kanidm identity
 
-On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply creates a Kanidm LDAP directory (`ldaps://kanidm:3636`) and a Kanidm OIDC directory (`stalwart-webui`). The WebUI uses OIDC so the Kanidm portal can sign you in; IMAP/SMTP password bind still needs the Kanidm password against LDAP, or `OAUTHBEARER`. Passkeys used on the Kanidm portal do not bind over LDAP. Mail users live in Kanidm (`mail-users` group).
+On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply upserts a Kanidm LDAP directory (`ldaps://kanidm:3636`) by URL (and removes leftover duplicates from earlier applies) and selects it as the authentication directory so **Bulwark / JMAP / IMAP password login** works with the Kanidm username (`thomas@opencomp.eu`) and Kanidm password. The old local Stalwart mailbox password no longer applies once this directory is selected. Passkeys used on the Kanidm portal do not bind over LDAP. An OIDC client (`stalwart-webui`) is still registered for later SSO; it is not the selected directory unless you set `identity.auth_directory: oidc` (that breaks Bulwark password login).
 
-Set `identity.auth_directory: ldap` in Stalwart `deploy.yaml` to keep the password form as the selected authentication directory. Set `identity.managed: false` to keep Stalwart's internal directory.
+Set `identity.managed: false` to keep Stalwart's internal directory.
 
 See [easydeploy-engine/docs/integrated-vps.md](../easydeploy-engine/docs/integrated-vps.md).
