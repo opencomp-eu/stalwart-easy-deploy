@@ -382,7 +382,7 @@ def render_integration_fragment(config: dict) -> None:
 
 
 def bulwark_oauth_env_lines(config: dict) -> list[str]:
-    """Kanidm OIDC for the Bulwark SSO button. Password login stays on LDAP."""
+    """Kanidm OIDC for Bulwark. Password form is hidden; IMAP uses Stalwart app passwords."""
     identity = apply_engine_identity_sidecar(config)
     oidc = identity.get("oidc") if isinstance(identity.get("oidc"), dict) else {}
     issuer = str(oidc.get("issuer_url") or "").strip().rstrip("/")
@@ -391,7 +391,8 @@ def bulwark_oauth_env_lines(config: dict) -> list[str]:
         return []
     return [
         "OAUTH_ENABLED=true",
-        "OAUTH_ONLY=false",
+        "OAUTH_ONLY=true",
+        "AUTO_SSO_ENABLED=true",
         f"OAUTH_CLIENT_ID={client_id}",
         f"OAUTH_ISSUER_URL={issuer}",
         "OAUTH_SCOPES=openid profile email",
@@ -1113,7 +1114,9 @@ def _upsert_directory(
 
 
 def apply_kanidm_directory(config: dict, secrets: dict) -> None:
-    """Point Stalwart auth at Kanidm LDAP. OIDC is registered but not selected."""
+    """Select Kanidm OIDC for browser SSO. LDAP stays registered; IMAP uses app passwords."""
+    operator_identity = config.get("identity") if isinstance(config.get("identity"), dict) else {}
+    operator_prefer = str(operator_identity.get("auth_directory") or "").strip().lower()
     identity = apply_engine_identity_sidecar(config)
     if str(identity.get("provider") or "").strip().lower() != "kanidm":
         return
@@ -1145,17 +1148,13 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
                 oidc_payload,
                 "kanidmOidc",
             )
-        prefer = str(identity.get("auth_directory") or "ldap").strip().lower()
-        if prefer == "oidc":
-            print(
-                "  Ignoring identity.auth_directory: oidc — Stalwart rejects "
-                "password/JMAP/IMAP binds against an OIDC directory "
-                "('Unsupported credentials type for OIDC backend'). "
-                "Selecting Kanidm LDAP so Bulwark can use the Kanidm password.",
-                file=sys.stderr,
-            )
-        directory_id = ldap_id
-        kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
+        use_oidc = bool(oidc_id) and operator_prefer != "ldap"
+        if use_oidc:
+            directory_id = oidc_id
+            kind = f"OIDC ({oidc_payload['issuerUrl']})"
+        else:
+            directory_id = ldap_id
+            kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
         auth = _jmap_ok(
             _jmap(
                 config,
@@ -1180,8 +1179,10 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         secrets["KANIDM_OIDC_DIRECTORY_ID"] = oidc_id
     save_yaml(SECRETS_PATH, secrets)
     print(f"  Stalwart authentication directory is Kanidm {kind}")
-    if oidc_id:
-        print("  Kanidm OIDC directory is registered but not selected (password login needs LDAP)")
+    if use_oidc:
+        print("  Bulwark SSO uses Kanidm. IMAP/SMTP should use a Stalwart app password.")
+    elif oidc_id:
+        print("  Kanidm OIDC directory is registered but not selected (identity.auth_directory: ldap)")
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:
@@ -1237,11 +1238,14 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
     identity = config.get("identity") if isinstance(config.get("identity"), dict) else {}
     if str(identity.get("provider") or "").strip().lower() == "kanidm":
-        print("Identity:        Kanidm LDAP (IMAP/SMTP/WebUI password bind)")
-        print("                 Log in as the Kanidm username with a Kanidm *password*.")
-        print("                 Passkeys work on the Kanidm portal, not on Stalwart.")
-        print("                 If you only enrolled a passkey, issue a credential reset")
-        print("                 in kanidm-easy-deploy and set a password before mail login.")
+        if str(identity.get("auth_directory") or "oidc").strip().lower() == "ldap":
+            print("Identity:        Kanidm LDAP (IMAP/SMTP/WebUI password bind)")
+            print("                 Log in as the Kanidm username with a Kanidm *password*.")
+        else:
+            print("Identity:        Kanidm OIDC (Bulwark / portal SSO)")
+            print("                 Webmail signs in through Kanidm (passkey or session).")
+            print("                 IMAP/SMTP: create a Stalwart app password in the admin UI.")
+            print("                 New mailboxes appear after the first successful SSO.")
     if bulwark_enabled(config):
         print(f"Webmail:         https://{config['bulwark']['domain']}")
     if proxy_mode(config) == "integrate":

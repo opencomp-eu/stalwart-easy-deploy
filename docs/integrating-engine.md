@@ -27,9 +27,9 @@ Standalone mode (`mode: standalone`, default) keeps the local `stalwart_caddy` c
 
 ## Kanidm identity
 
-On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply upserts a Kanidm LDAP directory (`ldaps://kanidm:3636`) by URL (and removes leftover duplicates from earlier applies) and **always selects LDAP** as the authentication directory so **Bulwark / JMAP / IMAP password login** works with the Kanidm username (`thomas@opencomp.eu`) and Kanidm password. Stalwart’s OIDC directory cannot accept a password (`Unsupported credentials type for OIDC backend`); `identity.auth_directory: oidc` is ignored for that reason. The old local Stalwart mailbox password no longer applies once LDAP is selected. Passkeys used on the Kanidm portal do not bind over LDAP.
+On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply upserts Kanidm LDAP (`ldaps://kanidm:3636`) and Kanidm OIDC (`stalwart-webui`) directories, then **selects OIDC** so Bulwark can SSO with a Kanidm passkey or session. The password form is hidden (`OAUTH_ONLY` + `AUTO_SSO_ENABLED`). Stalwart’s OIDC directory cannot accept a password (`Unsupported credentials type for OIDC backend`); IMAP/SMTP clients should use a **Stalwart app password**. Set `identity.auth_directory: ldap` in Stalwart `deploy.yaml` to go back to Kanidm-password login.
 
-The Kanidm portal **Webmail** tile (`stalwart-webui`) lands on the Bulwark origin. Apply also sets Bulwark `OAUTH_*` so the login page can offer Kanidm SSO. Completing that flow presents a Kanidm access token to Stalwart JMAP; with LDAP selected as `directoryId`, bearer tokens are not accepted. Keep the password form (`OAUTH_ONLY=false`) until Stalwart can validate OIDC tokens without dropping LDAP binds.
+The Kanidm portal **Webmail** tile lands on the Bulwark origin and starts the OIDC flow. New Kanidm people get a mailbox on first successful SSO; inbound mail before that first login depends on an existing Stalwart mailbox.
 
 Set `identity.managed: false` to keep Stalwart's internal directory.
 

@@ -305,7 +305,8 @@ def test_bulwark_oauth_env_lines_from_sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
     lines = bulwark_oauth_env_lines(_base_config())
     assert "OAUTH_ENABLED=true" in lines
-    assert "OAUTH_ONLY=false" in lines
+    assert "OAUTH_ONLY=true" in lines
+    assert "AUTO_SSO_ENABLED=true" in lines
     assert "OAUTH_CLIENT_ID=stalwart-webui" in lines
     assert "OAUTH_ISSUER_URL=https://idm.test.example/oauth2/openid/stalwart-webui" in lines
 
@@ -600,7 +601,7 @@ def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):
     assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
 
 
-def test_apply_kanidm_directory_ignores_oidc_auth_directory(tmp_path, monkeypatch):
+def test_apply_kanidm_directory_selects_oidc_for_sso(tmp_path, monkeypatch):
     sidecar = tmp_path / "identity-provider.yaml"
     sidecar.write_text(
         yaml.safe_dump(
@@ -652,13 +653,13 @@ def test_apply_kanidm_directory_ignores_oidc_auth_directory(tmp_path, monkeypatc
     secrets: dict = {}
     apply_kanidm_directory(_base_config(), secrets)
     assert created == ["kanidm", "kanidmOidc"]
-    assert selected == ["dir-kanidm"]
-    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
+    assert selected == ["dir-kanidmOidc"]
+    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidmOidc"
     assert secrets["KANIDM_LDAP_DIRECTORY_ID"] == "dir-kanidm"
     assert secrets["KANIDM_OIDC_DIRECTORY_ID"] == "dir-kanidmOidc"
 
 
-def test_apply_kanidm_directory_defaults_to_ldap_when_oidc_present(tmp_path, monkeypatch):
+def test_apply_kanidm_directory_defaults_to_oidc_when_present(tmp_path, monkeypatch):
     sidecar = tmp_path / "identity-provider.yaml"
     sidecar.write_text(
         yaml.safe_dump(
@@ -704,8 +705,8 @@ def test_apply_kanidm_directory_defaults_to_ldap_when_oidc_present(tmp_path, mon
 
     secrets: dict = {}
     apply_kanidm_directory(_base_config(), secrets)
-    assert selected == ["dir-kanidm"]
-    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
+    assert selected == ["dir-kanidmOidc"]
+    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidmOidc"
 
 
 def test_directory_matches_ldap_by_url_when_description_is_generic():
@@ -797,8 +798,60 @@ def test_apply_kanidm_directory_reuses_url_and_destroys_duplicates(tmp_path, mon
     apply_kanidm_directory(_base_config(), secrets)
     assert created == []
     assert set(destroyed) == {"ldap-2", "ldap-3"}
-    assert secrets["KANIDM_DIRECTORY_ID"] == "ldap-1"
+    assert secrets["KANIDM_DIRECTORY_ID"] == "oidc-1"
     assert secrets["KANIDM_OIDC_DIRECTORY_ID"] == "oidc-1"
+    assert secrets["KANIDM_LDAP_DIRECTORY_ID"] == "ldap-1"
+
+
+def test_apply_kanidm_directory_operator_can_keep_ldap(tmp_path, monkeypatch):
+    sidecar = tmp_path / "identity-provider.yaml"
+    sidecar.write_text(
+        yaml.safe_dump(
+            {
+                "provider": "kanidm",
+                "auth_directory": "oidc",
+                "ldap": {
+                    "url": "ldaps://kanidm:3636",
+                    "base_dn": "dc=idm,dc=test,dc=example",
+                    "bind_secret": "token",
+                },
+                "oidc": {
+                    "issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui",
+                    "client_id": "stalwart-webui",
+                },
+            }
+        )
+    )
+    secrets_path = tmp_path / "secrets.yaml"
+    selected: list[str] = []
+    directories: list[dict] = []
+
+    def fake_list(_config, _secrets, type_name):
+        return list(directories)
+
+    def fake_jmap(_config, _secrets, method_calls, **_kwargs):
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        if method == "x:Directory/set":
+            create = method_calls[0][1].get("create") or {}
+            key = next(iter(create))
+            new_id = f"dir-{key}"
+            directories.append({"id": new_id, "description": create[key]["description"]})
+            return {"methodResponses": [[method, {"created": {key: {"id": new_id}}}, cid]]}
+        if method == "x:Authentication/set":
+            selected.append(method_calls[0][1]["update"]["singleton"]["directoryId"])
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
+    monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
+    monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+
+    secrets: dict = {}
+    apply_kanidm_directory(_base_config(identity={"auth_directory": "ldap"}), secrets)
+    assert selected == ["dir-kanidm"]
+    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
 
 
 def test_apply_kanidm_directory_missing_bind_secret_raises(tmp_path, monkeypatch):

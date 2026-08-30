@@ -48,7 +48,7 @@ After the stack is up:
 
 - **`deploy.yaml`** — operator settings (hostname, domains, image tags, ports).
 - **`.stalwart-easy-deploy/secrets.yaml`** — generated recovery password and Bulwark session secret (do not commit).
-- **Kanidm** (via easydeploy-engine) is the organisation directory. IMAP/SMTP authenticate against Kanidm LDAP; do not create parallel mailboxes in Stalwart for those users.
+- **Kanidm** (via easydeploy-engine) is the organisation directory. Bulwark signs in through Kanidm OIDC. IMAP/SMTP clients should use a Stalwart app password.
 - **`/var/lib/stalwart`** (default) — Stalwart config (`etc/`) and mail data (`data/`).
 - **`/var/lib/bulwark`** (default) — Bulwark settings, admin config, and telemetry.
 
