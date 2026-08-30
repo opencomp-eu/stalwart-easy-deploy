@@ -909,6 +909,7 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
 
 IDENTITY_SIDECAR = INTEGRATION_DIR / "identity-provider.yaml"
 KANIDM_DIRECTORY_DESCRIPTION = "Kanidm"
+KANIDM_OIDC_DIRECTORY_DESCRIPTION = "Kanidm OIDC"
 
 
 def managed_is_false(section: dict | None) -> bool:
@@ -990,59 +991,110 @@ def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
     }
 
 
+def build_oidc_directory(identity: dict) -> dict | None:
+    oidc = identity.get("oidc") if isinstance(identity.get("oidc"), dict) else {}
+    issuer = str(oidc.get("issuer_url") or "").strip()
+    if not issuer:
+        return None
+    client_id = str(oidc.get("client_id") or "stalwart-webui").strip() or "stalwart-webui"
+    payload: dict[str, Any] = {
+        "@type": "Oidc",
+        "description": KANIDM_OIDC_DIRECTORY_DESCRIPTION,
+        "issuerUrl": issuer,
+        "requireAudience": str(oidc.get("require_audience") or client_id),
+        "requireScopes": {"openid": True, "email": True, "profile": True},
+        "claimUsername": str(oidc.get("claim_username") or "preferred_username"),
+        "claimName": str(oidc.get("claim_name") or "name"),
+        "claimGroups": str(oidc.get("claim_groups") or "groups"),
+    }
+    username_domain = str(oidc.get("username_domain") or "").strip()
+    if username_domain:
+        payload["usernameDomain"] = username_domain
+    return payload
+
+
+def _upsert_directory(
+    config: dict,
+    secrets: dict,
+    directories: list[dict],
+    description: str,
+    payload: dict,
+    create_key: str,
+) -> str:
+    existing = next(
+        (item for item in directories if str(item.get("description") or "") == description),
+        None,
+    )
+    if existing and existing.get("id"):
+        directory_id = str(existing["id"])
+        updated = _jmap_ok(
+            _jmap(
+                config,
+                secrets,
+                [["x:Directory/set", {"update": {directory_id: payload}}, "d"]],
+            ),
+            "d",
+        )
+        if updated.get("notUpdated"):
+            raise RuntimeError(str(updated["notUpdated"]))
+        return directory_id
+    created = _jmap_ok(
+        _jmap(
+            config,
+            secrets,
+            [["x:Directory/set", {"create": {create_key: payload}}, "d"]],
+        ),
+        "d",
+    )
+    if created.get("notCreated"):
+        raise RuntimeError(str(created["notCreated"]))
+    created_obj = (created.get("created") or {}).get(create_key) or {}
+    directory_id = str(created_obj.get("id") or "")
+    if not directory_id:
+        raise RuntimeError("Directory/set did not return an id")
+    return directory_id
+
+
 def apply_kanidm_directory(config: dict, secrets: dict) -> None:
-    """Point Stalwart IMAP/SMTP identity at Kanidm LDAP when the engine sidecar is present."""
+    """Point Stalwart at Kanidm. OIDC is used for WebUI SSO; LDAP stays for IMAP bind."""
     identity = apply_engine_identity_sidecar(config)
     if str(identity.get("provider") or "").strip().lower() != "kanidm":
         return
     if managed_is_false(identity):
         return
-    payload = build_ldap_directory(identity, secrets)
-    if payload is None:
+    ldap_payload = build_ldap_directory(identity, secrets)
+    if ldap_payload is None:
         raise RuntimeError(
             "Kanidm identity is enabled but Stalwart has no LDAP bind secret or base DN. "
             "Re-apply kanidm-easy-deploy (so LDAP_TOKEN exists), then re-apply Stalwart."
         )
+    oidc_payload = build_oidc_directory(identity)
     try:
         directories = _jmap_list(config, secrets, "Directory")
     except RuntimeError as exc:
-        raise RuntimeError(f"Could not list Stalwart directories for Kanidm LDAP: {exc}") from exc
-    existing = next(
-        (
-            item
-            for item in directories
-            if str(item.get("description") or "") == KANIDM_DIRECTORY_DESCRIPTION
-        ),
-        None,
-    )
+        raise RuntimeError(f"Could not list Stalwart directories for Kanidm: {exc}") from exc
     try:
-        if existing and existing.get("id"):
-            directory_id = str(existing["id"])
-            updated = _jmap_ok(
-                _jmap(
-                    config,
-                    secrets,
-                    [["x:Directory/set", {"update": {directory_id: payload}}, "d"]],
-                ),
-                "d",
+        ldap_id = _upsert_directory(
+            config, secrets, directories, KANIDM_DIRECTORY_DESCRIPTION, ldap_payload, "kanidm"
+        )
+        directories = _jmap_list(config, secrets, "Directory")
+        oidc_id = ""
+        if oidc_payload:
+            oidc_id = _upsert_directory(
+                config,
+                secrets,
+                directories,
+                KANIDM_OIDC_DIRECTORY_DESCRIPTION,
+                oidc_payload,
+                "kanidmOidc",
             )
-            if updated.get("notUpdated"):
-                raise RuntimeError(str(updated["notUpdated"]))
+        prefer = str(identity.get("auth_directory") or "").strip().lower()
+        if prefer == "ldap" or not oidc_id:
+            directory_id = ldap_id
+            kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
         else:
-            created = _jmap_ok(
-                _jmap(
-                    config,
-                    secrets,
-                    [["x:Directory/set", {"create": {"kanidm": payload}}, "d"]],
-                ),
-                "d",
-            )
-            if created.get("notCreated"):
-                raise RuntimeError(str(created["notCreated"]))
-            created_obj = (created.get("created") or {}).get("kanidm") or {}
-            directory_id = str(created_obj.get("id") or "")
-            if not directory_id:
-                raise RuntimeError("Directory/set did not return an id")
+            directory_id = oidc_id
+            kind = f"OIDC ({oidc_payload['issuerUrl']})"
         auth = _jmap_ok(
             _jmap(
                 config,
@@ -1060,10 +1112,13 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         if auth.get("notUpdated"):
             raise RuntimeError(str(auth["notUpdated"]))
     except RuntimeError as exc:
-        raise RuntimeError(f"Could not apply Kanidm LDAP directory: {exc}") from exc
+        raise RuntimeError(f"Could not apply Kanidm directory: {exc}") from exc
     secrets["KANIDM_DIRECTORY_ID"] = directory_id
+    secrets["KANIDM_LDAP_DIRECTORY_ID"] = ldap_id
+    if oidc_id:
+        secrets["KANIDM_OIDC_DIRECTORY_ID"] = oidc_id
     save_yaml(SECRETS_PATH, secrets)
-    print(f"  Stalwart directory is Kanidm LDAP ({payload['url']}, {payload['baseDn']})")
+    print(f"  Stalwart authentication directory is Kanidm {kind}")
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:
