@@ -27,7 +27,7 @@ Standalone mode (`mode: standalone`, default) keeps the local `stalwart_caddy` c
 
 ## Kanidm identity
 
-On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply creates a Stalwart LDAP directory against `ldaps://kanidm:3636` (IMAP/SMTP bind + recipient lookup) and sets it as the authentication directory. Mail users live in Kanidm (`mail-users` group, POSIX password bind). An OIDC client is also registered for tokens/webmail; LDAP remains the source of truth for mailboxes.
+On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply creates a Stalwart LDAP directory against `ldaps://kanidm:3636` (IMAP/SMTP/WebUI bind + recipient lookup) and sets it as the authentication directory. Mail users live in Kanidm (`mail-users` group). Log in with the Kanidm **username and password**; passkeys used on the Kanidm portal do not work here. An OIDC client is also registered for OAUTHBEARER tokens; LDAP remains the source of truth for mailboxes.
 
 Set `identity.managed: false` to keep Stalwart's internal directory.
 

@@ -997,17 +997,14 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         return
     payload = build_ldap_directory(identity, secrets)
     if payload is None:
-        print(
-            "Warning: Kanidm identity sidecar has no LDAP bind secret or base DN yet. "
-            "Re-apply kanidm-easy-deploy, then re-apply Stalwart.",
-            file=sys.stderr,
+        raise RuntimeError(
+            "Kanidm identity is enabled but Stalwart has no LDAP bind secret or base DN. "
+            "Re-apply kanidm-easy-deploy (so LDAP_TOKEN exists), then re-apply Stalwart."
         )
-        return
     try:
         directories = _jmap_list(config, secrets, "Directory")
     except RuntimeError as exc:
-        print(f"Warning: could not list Stalwart directories: {exc}", file=sys.stderr)
-        return
+        raise RuntimeError(f"Could not list Stalwart directories for Kanidm LDAP: {exc}") from exc
     existing = next(
         (
             item
@@ -1061,8 +1058,7 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         if auth.get("notUpdated"):
             raise RuntimeError(str(auth["notUpdated"]))
     except RuntimeError as exc:
-        print(f"Warning: could not apply Kanidm LDAP directory: {exc}", file=sys.stderr)
-        return
+        raise RuntimeError(f"Could not apply Kanidm LDAP directory: {exc}") from exc
     secrets["KANIDM_DIRECTORY_ID"] = directory_id
     save_yaml(SECRETS_PATH, secrets)
     print(f"  Stalwart directory is Kanidm LDAP ({payload['url']}, {payload['baseDn']})")
@@ -1121,7 +1117,11 @@ def print_summary(config: dict, secrets: dict) -> None:
     print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
     identity = config.get("identity") if isinstance(config.get("identity"), dict) else {}
     if str(identity.get("provider") or "").strip().lower() == "kanidm":
-        print("Identity:        Kanidm LDAP (IMAP/SMTP) + OIDC client for tokens/webmail")
+        print("Identity:        Kanidm LDAP (IMAP/SMTP/WebUI password bind)")
+        print("                 Log in as the Kanidm username with a Kanidm *password*.")
+        print("                 Passkeys work on the Kanidm portal, not on Stalwart.")
+        print("                 If you only enrolled a passkey, issue a credential reset")
+        print("                 in kanidm-easy-deploy and set a password before mail login.")
     if bulwark_enabled(config):
         print(f"Webmail:         https://{config['bulwark']['domain']}")
     if proxy_mode(config) == "integrate":

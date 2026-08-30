@@ -553,3 +553,22 @@ def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):
     assert "x:Authentication/set" in calls
     assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
 
+
+def test_apply_kanidm_directory_missing_bind_secret_raises(tmp_path, monkeypatch):
+    sidecar = tmp_path / "identity-provider.yaml"
+    sidecar.write_text(
+        yaml.safe_dump(
+            {
+                "provider": "kanidm",
+                "ldap": {
+                    "url": "ldaps://kanidm:3636",
+                    "base_dn": "dc=idm,dc=test,dc=example",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
+    monkeypatch.setattr("scripts.apply._sibling_kanidm_ldap_token", lambda: "")
+    with pytest.raises(RuntimeError, match="LDAP bind secret"):
+        apply_kanidm_directory(_base_config(), {})
+
