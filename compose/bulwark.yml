@@ -15,6 +15,11 @@ services:
       SESSION_SECRET: ${BULWARK_SESSION_SECRET}
       SETTINGS_SYNC_ENABLED: "true"
       STALWART_FEATURES: "true"
+      OAUTH_ENABLED: ${OAUTH_ENABLED:-false}
+      OAUTH_ONLY: ${OAUTH_ONLY:-false}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-}
+      OAUTH_ISSUER_URL: ${OAUTH_ISSUER_URL:-}
+      OAUTH_SCOPES: ${OAUTH_SCOPES:-openid profile email}
     volumes:
       - ${BULWARK_DATA_DIR}/settings:/app/data/settings
       - ${BULWARK_DATA_DIR}/admin:/app/data/admin

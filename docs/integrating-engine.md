@@ -27,7 +27,9 @@ Standalone mode (`mode: standalone`, default) keeps the local `stalwart_caddy` c
 
 ## Kanidm identity
 
-On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply upserts a Kanidm LDAP directory (`ldaps://kanidm:3636`) by URL (and removes leftover duplicates from earlier applies) and **always selects LDAP** as the authentication directory so **Bulwark / JMAP / IMAP password login** works with the Kanidm username (`thomas@opencomp.eu`) and Kanidm password. Stalwart’s OIDC directory cannot accept a password (`Unsupported credentials type for OIDC backend`); `identity.auth_directory: oidc` is ignored for that reason. The old local Stalwart mailbox password no longer applies once LDAP is selected. Passkeys used on the Kanidm portal do not bind over LDAP. An OIDC client (`stalwart-webui`) is still registered for later browser SSO; it is not the selected directory.
+On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/integration/identity-provider.yaml`. After bootstrap, apply upserts a Kanidm LDAP directory (`ldaps://kanidm:3636`) by URL (and removes leftover duplicates from earlier applies) and **always selects LDAP** as the authentication directory so **Bulwark / JMAP / IMAP password login** works with the Kanidm username (`thomas@opencomp.eu`) and Kanidm password. Stalwart’s OIDC directory cannot accept a password (`Unsupported credentials type for OIDC backend`); `identity.auth_directory: oidc` is ignored for that reason. The old local Stalwart mailbox password no longer applies once LDAP is selected. Passkeys used on the Kanidm portal do not bind over LDAP.
+
+The Kanidm portal **Webmail** tile (`stalwart-webui`) lands on the Bulwark origin. Apply also sets Bulwark `OAUTH_*` so the login page can offer Kanidm SSO. Completing that flow presents a Kanidm access token to Stalwart JMAP; with LDAP selected as `directoryId`, bearer tokens are not accepted. Keep the password form (`OAUTH_ONLY=false`) until Stalwart can validate OIDC tokens without dropping LDAP binds.
 
 Set `identity.managed: false` to keep Stalwart's internal directory.
 

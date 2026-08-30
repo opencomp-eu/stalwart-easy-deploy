@@ -381,6 +381,23 @@ def render_integration_fragment(config: dict) -> None:
     INTEGRATION_CADDY_FRAGMENT.write_text(site_blocks(config) + "\n")
 
 
+def bulwark_oauth_env_lines(config: dict) -> list[str]:
+    """Kanidm OIDC for the Bulwark SSO button. Password login stays on LDAP."""
+    identity = apply_engine_identity_sidecar(config)
+    oidc = identity.get("oidc") if isinstance(identity.get("oidc"), dict) else {}
+    issuer = str(oidc.get("issuer_url") or "").strip().rstrip("/")
+    client_id = str(oidc.get("client_id") or "").strip()
+    if not issuer or not client_id:
+        return []
+    return [
+        "OAUTH_ENABLED=true",
+        "OAUTH_ONLY=false",
+        f"OAUTH_CLIENT_ID={client_id}",
+        f"OAUTH_ISSUER_URL={issuer}",
+        "OAUTH_SCOPES=openid profile email",
+    ]
+
+
 def write_compose_env(config: dict, secrets: dict) -> None:
     stalwart = config["stalwart"]
     image = f"{stalwart.get('image', 'docker.io/stalwartlabs/stalwart')}:{stalwart.get('tag', 'v0.16')}"
@@ -414,6 +431,7 @@ def write_compose_env(config: dict, secrets: dict) -> None:
                 f"JMAP_SERVER_URL={public_url(config)}",
             ]
         )
+        lines.extend(bulwark_oauth_env_lines(config))
     if proxy_mode(config) == "standalone":
         lines.append(f"SED_CADDYFILE={CADDYFILE.resolve()}")
     COMPOSE_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)

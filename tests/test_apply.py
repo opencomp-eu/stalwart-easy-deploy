@@ -15,6 +15,7 @@ from scripts.apply import (
     bootstrap_update_fields,
     build_ldap_directory,
     build_oidc_directory,
+    bulwark_oauth_env_lines,
     _directory_matches,
     derive_compose_files,
     ensure_data_dirs,
@@ -275,6 +276,7 @@ def test_write_compose_env(tmp_path, monkeypatch):
     env_path = tmp_path / "compose.env"
     monkeypatch.setattr("scripts.apply.COMPOSE_ENV_PATH", env_path)
     monkeypatch.setattr("scripts.apply.CADDYFILE", tmp_path / "Caddyfile")
+    monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", tmp_path / "missing-identity.yaml")
     secrets = {"RECOVERY_ADMIN_PASSWORD": "pw", "BULWARK_SESSION_SECRET": "sess"}
     write_compose_env(_base_config(), secrets)
     text = env_path.read_text()
@@ -284,6 +286,28 @@ def test_write_compose_env(tmp_path, monkeypatch):
     assert "JMAP_SERVER_URL=https://mail.test.example" in text
     assert "BULWARK_SESSION_SECRET=sess" in text
     assert "SMTP_PORT=25" in text
+    assert "OAUTH_ENABLED=" not in text
+
+
+def test_bulwark_oauth_env_lines_from_sidecar(tmp_path, monkeypatch):
+    sidecar = tmp_path / "identity-provider.yaml"
+    sidecar.write_text(
+        yaml.safe_dump(
+            {
+                "provider": "kanidm",
+                "oidc": {
+                    "issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui",
+                    "client_id": "stalwart-webui",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
+    lines = bulwark_oauth_env_lines(_base_config())
+    assert "OAUTH_ENABLED=true" in lines
+    assert "OAUTH_ONLY=false" in lines
+    assert "OAUTH_CLIENT_ID=stalwart-webui" in lines
+    assert "OAUTH_ISSUER_URL=https://idm.test.example/oauth2/openid/stalwart-webui" in lines
 
 
 def test_ensure_data_dirs_creates_bulwark_layout(tmp_path):
