@@ -978,12 +978,14 @@ def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
         "allowInvalidCerts": True,
         "useTls": True,
         "filterLogin": str(
-            ldap.get("filter_login") or "(&(objectclass=account)(|(name=?)(mail=?)(spn=?)))"
+            ldap.get("filter_login")
+            or "(&(|(objectclass=account)(objectclass=person))(|(name=?)(uid=?)(mail=?)(spn=?)))"
         ),
         "filterMailbox": str(
-            ldap.get("filter_mailbox") or "(&(objectclass=account)(|(mail=?)(spn=?)))"
+            ldap.get("filter_mailbox")
+            or "(&(|(objectclass=account)(objectclass=person))(|(mail=?)(spn=?)))"
         ),
-        "attrEmail": {str(ldap.get("attr_email") or "mail"): True},
+        "attrEmail": {str(ldap.get("attr_email") or "mail"): True, "emailprimary": True},
         "attrDescription": {str(ldap.get("attr_description") or "displayname"): True},
         "attrMemberOf": {str(ldap.get("attr_member_of") or "memberof"): True},
         "attrClass": {"objectclass": True},
@@ -1093,7 +1095,7 @@ def _upsert_directory(
 
 
 def apply_kanidm_directory(config: dict, secrets: dict) -> None:
-    """Point Stalwart at Kanidm. OIDC is used for WebUI SSO; LDAP stays for IMAP bind."""
+    """Point Stalwart auth at Kanidm LDAP. OIDC is registered but not selected."""
     identity = apply_engine_identity_sidecar(config)
     if str(identity.get("provider") or "").strip().lower() != "kanidm":
         return
@@ -1126,12 +1128,16 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
                 "kanidmOidc",
             )
         prefer = str(identity.get("auth_directory") or "ldap").strip().lower()
-        if prefer == "oidc" and oidc_id:
-            directory_id = oidc_id
-            kind = f"OIDC ({oidc_payload['issuerUrl']})"
-        else:
-            directory_id = ldap_id
-            kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
+        if prefer == "oidc":
+            print(
+                "  Ignoring identity.auth_directory: oidc — Stalwart rejects "
+                "password/JMAP/IMAP binds against an OIDC directory "
+                "('Unsupported credentials type for OIDC backend'). "
+                "Selecting Kanidm LDAP so Bulwark can use the Kanidm password.",
+                file=sys.stderr,
+            )
+        directory_id = ldap_id
+        kind = f"LDAP ({ldap_payload['url']}, {ldap_payload['baseDn']})"
         auth = _jmap_ok(
             _jmap(
                 config,
@@ -1156,6 +1162,8 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         secrets["KANIDM_OIDC_DIRECTORY_ID"] = oidc_id
     save_yaml(SECRETS_PATH, secrets)
     print(f"  Stalwart authentication directory is Kanidm {kind}")
+    if oidc_id:
+        print("  Kanidm OIDC directory is registered but not selected (password login needs LDAP)")
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:

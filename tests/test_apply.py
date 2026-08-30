@@ -505,7 +505,7 @@ def test_build_ldap_directory_payload():
     assert payload["baseDn"] == "dc=idm,dc=test,dc=example"
     assert payload["bindSecret"] == {"@type": "Value", "secret": "token"}
     assert payload["bindAuthentication"] is True
-    assert payload["filterLogin"].startswith("(&(objectclass=account)")
+    assert "objectclass=account" in payload["filterLogin"]
     assert "spn=?" in payload["filterLogin"]
     assert "mail=?" in payload["filterMailbox"]
 
@@ -576,7 +576,7 @@ def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):
     assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
 
 
-def test_apply_kanidm_directory_prefers_oidc_for_webui(tmp_path, monkeypatch):
+def test_apply_kanidm_directory_ignores_oidc_auth_directory(tmp_path, monkeypatch):
     sidecar = tmp_path / "identity-provider.yaml"
     sidecar.write_text(
         yaml.safe_dump(
@@ -628,9 +628,10 @@ def test_apply_kanidm_directory_prefers_oidc_for_webui(tmp_path, monkeypatch):
     secrets: dict = {}
     apply_kanidm_directory(_base_config(), secrets)
     assert created == ["kanidm", "kanidmOidc"]
-    assert selected == ["dir-kanidmOidc"]
-    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidmOidc"
+    assert selected == ["dir-kanidm"]
+    assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidm"
     assert secrets["KANIDM_LDAP_DIRECTORY_ID"] == "dir-kanidm"
+    assert secrets["KANIDM_OIDC_DIRECTORY_ID"] == "dir-kanidmOidc"
 
 
 def test_apply_kanidm_directory_defaults_to_ldap_when_oidc_present(tmp_path, monkeypatch):
