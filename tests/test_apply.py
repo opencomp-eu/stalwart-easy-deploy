@@ -504,6 +504,8 @@ def test_build_ldap_directory_payload():
     assert payload["bindSecret"] == {"@type": "Value", "secret": "token"}
     assert payload["bindAuthentication"] is True
     assert payload["filterLogin"].startswith("(&(objectclass=account)")
+    assert "spn=?" in payload["filterLogin"]
+    assert "mail=?" in payload["filterMailbox"]
 
 
 def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):

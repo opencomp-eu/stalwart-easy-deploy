@@ -977,9 +977,11 @@ def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
         "allowInvalidCerts": True,
         "useTls": True,
         "filterLogin": str(
-            ldap.get("filter_login") or "(&(objectclass=account)(|(name=?)(mail=?)))"
+            ldap.get("filter_login") or "(&(objectclass=account)(|(name=?)(mail=?)(spn=?)))"
         ),
-        "filterMailbox": str(ldap.get("filter_mailbox") or "(&(objectclass=account)(mail=?))"),
+        "filterMailbox": str(
+            ldap.get("filter_mailbox") or "(&(objectclass=account)(|(mail=?)(spn=?)))"
+        ),
         "attrEmail": {str(ldap.get("attr_email") or "mail"): True},
         "attrDescription": {str(ldap.get("attr_description") or "displayname"): True},
         "attrMemberOf": {str(ldap.get("attr_member_of") or "memberof"): True},
