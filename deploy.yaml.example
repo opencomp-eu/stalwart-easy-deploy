@@ -29,7 +29,9 @@ ports:
   imaps: 993
   sieve: 4190
 
-# identity.provider: kanidm — written by easydeploy-engine. IMAP/SMTP bind Kanidm LDAP.
+# identity.provider: kanidm — written by easydeploy-engine.
+# Bulwark signs in through Kanidm OIDC. IMAP/SMTP use a Stalwart app password.
+# Set identity.auth_directory: ldap to bind IMAP with the Kanidm password instead.
 # Set identity.managed: false to keep Stalwart's internal directory.
 # identity:
 #   provider: kanidm

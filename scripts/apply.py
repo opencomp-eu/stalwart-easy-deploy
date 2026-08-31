@@ -929,6 +929,14 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
 IDENTITY_SIDECAR = INTEGRATION_DIR / "identity-provider.yaml"
 KANIDM_DIRECTORY_DESCRIPTION = "Kanidm"
 KANIDM_OIDC_DIRECTORY_DESCRIPTION = "Kanidm OIDC"
+# Fallback filters if the engine sidecar is missing. Keep in sync with
+# easydeploy-engine/scripts/oidc_wire.py.
+KANIDM_LDAP_FILTER_LOGIN = (
+    "(&(|(objectclass=account)(objectclass=person))(|(name=?)(uid=?)(mail=?)(spn=?)))"
+)
+KANIDM_LDAP_FILTER_MAILBOX = (
+    "(&(|(objectclass=account)(objectclass=person))(|(mail=?)(spn=?)))"
+)
 
 
 def managed_is_false(section: dict | None) -> bool:
@@ -996,14 +1004,8 @@ def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
         "bindAuthentication": True,
         "allowInvalidCerts": True,
         "useTls": True,
-        "filterLogin": str(
-            ldap.get("filter_login")
-            or "(&(|(objectclass=account)(objectclass=person))(|(name=?)(uid=?)(mail=?)(spn=?)))"
-        ),
-        "filterMailbox": str(
-            ldap.get("filter_mailbox")
-            or "(&(|(objectclass=account)(objectclass=person))(|(mail=?)(spn=?)))"
-        ),
+        "filterLogin": str(ldap.get("filter_login") or KANIDM_LDAP_FILTER_LOGIN),
+        "filterMailbox": str(ldap.get("filter_mailbox") or KANIDM_LDAP_FILTER_MAILBOX),
         "attrEmail": {str(ldap.get("attr_email") or "mail"): True, "emailprimary": True},
         "attrDescription": {str(ldap.get("attr_description") or "displayname"): True},
         "attrMemberOf": {str(ldap.get("attr_member_of") or "memberof"): True},
@@ -1071,7 +1073,6 @@ def _upsert_directory(
     config: dict,
     secrets: dict,
     directories: list[dict],
-    description: str,
     payload: dict,
     create_key: str,
 ) -> str:
@@ -1134,20 +1135,11 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
     except RuntimeError as exc:
         raise RuntimeError(f"Could not list Stalwart directories for Kanidm: {exc}") from exc
     try:
-        ldap_id = _upsert_directory(
-            config, secrets, directories, KANIDM_DIRECTORY_DESCRIPTION, ldap_payload, "kanidm"
-        )
+        ldap_id = _upsert_directory(config, secrets, directories, ldap_payload, "kanidm")
         directories = _jmap_list(config, secrets, "Directory")
         oidc_id = ""
         if oidc_payload:
-            oidc_id = _upsert_directory(
-                config,
-                secrets,
-                directories,
-                KANIDM_OIDC_DIRECTORY_DESCRIPTION,
-                oidc_payload,
-                "kanidmOidc",
-            )
+            oidc_id = _upsert_directory(config, secrets, directories, oidc_payload, "kanidmOidc")
         use_oidc = bool(oidc_id) and operator_prefer != "ldap"
         if use_oidc:
             directory_id = oidc_id

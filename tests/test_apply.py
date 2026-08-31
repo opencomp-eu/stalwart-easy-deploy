@@ -493,8 +493,8 @@ def test_apply_engine_identity_sidecar_fills_kanidm(tmp_path):
                     "bind_secret": "ldap-token",
                 },
                 "oidc": {
-                    "issuer_url": "https://idm.test.example/oauth2/openid/stalwart",
-                    "client_id": "stalwart",
+                    "issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui",
+                    "client_id": "stalwart-webui",
                 },
             }
         )
