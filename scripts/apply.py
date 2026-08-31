@@ -401,7 +401,7 @@ def bulwark_oauth_env_lines(config: dict) -> list[str]:
 
 def write_compose_env(config: dict, secrets: dict) -> None:
     stalwart = config["stalwart"]
-    image = f"{stalwart.get('image', 'docker.io/stalwartlabs/stalwart')}:{stalwart.get('tag', 'v0.16')}"
+    image = f"{stalwart.get('image', 'docker.io/stalwartlabs/stalwart')}:{stalwart.get('tag', 'v0.16.20')}"
     data_root = Path(str(stalwart["data_dir"]))
     ports = config.get("ports") or {}
     recovery_user = str(stalwart.get("recovery_admin_user") or "admin").strip() or "admin"
@@ -421,7 +421,7 @@ def write_compose_env(config: dict, secrets: dict) -> None:
         bulwark = config["bulwark"]
         bulwark_image = (
             f"{bulwark.get('image', 'ghcr.io/bulwarkmail/webmail')}:"
-            f"{bulwark.get('tag', '1.7.5')}"
+            f"{bulwark.get('tag', '1.9.2')}"
         )
         lines.extend(
             [

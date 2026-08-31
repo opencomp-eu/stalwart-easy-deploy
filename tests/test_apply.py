@@ -38,14 +38,14 @@ def _base_config(**overrides) -> dict:
             "hostname": "mail.test.example",
             "domain": "test.example",
             "image": "docker.io/stalwartlabs/stalwart",
-            "tag": "v0.16",
+            "tag": "v0.16.20",
             "data_dir": "/var/lib/stalwart",
         },
         "bulwark": {
             "enabled": True,
             "domain": "webmail.test.example",
             "image": "ghcr.io/bulwarkmail/webmail",
-            "tag": "1.7.5",
+            "tag": "1.9.2",
             "data_dir": "/var/lib/bulwark",
             "app_name": "Webmail",
         },
@@ -280,7 +280,7 @@ def test_write_compose_env(tmp_path, monkeypatch):
     secrets = {"RECOVERY_ADMIN_PASSWORD": "pw", "BULWARK_SESSION_SECRET": "sess"}
     write_compose_env(_base_config(), secrets)
     text = env_path.read_text()
-    assert "STALWART_IMAGE=docker.io/stalwartlabs/stalwart:v0.16" in text
+    assert "STALWART_IMAGE=docker.io/stalwartlabs/stalwart:v0.16.20" in text
     assert "STALWART_PUBLIC_URL=https://mail.test.example" in text
     assert "STALWART_RECOVERY_ADMIN=admin:pw" in text
     assert "JMAP_SERVER_URL=https://mail.test.example" in text

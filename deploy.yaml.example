@@ -7,7 +7,7 @@ stalwart:
   # Primary email domain served by this installation
   domain: example.com
   image: docker.io/stalwartlabs/stalwart
-  tag: "v0.16"
+  tag: "v0.16.20"
   data_dir: /var/lib/stalwart
   # Caddy terminates HTTPS and proxies plain HTTP to Stalwart :8080.
   # Only set https if you have a working TLS listener on stalwart:443.
@@ -17,7 +17,7 @@ bulwark:
   enabled: true
   domain: webmail.example.com
   image: ghcr.io/bulwarkmail/webmail
-  tag: "1.7.5"
+  tag: "1.9.2"
   data_dir: /var/lib/bulwark
   app_name: Webmail
 

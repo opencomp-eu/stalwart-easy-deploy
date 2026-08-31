@@ -51,7 +51,7 @@ def update_from_wizard(
     stalwart["hostname"] = hostname
     stalwart["domain"] = domain
     stalwart.setdefault("image", "docker.io/stalwartlabs/stalwart")
-    stalwart.setdefault("tag", "v0.16")
+    stalwart.setdefault("tag", "v0.16.20")
     stalwart["data_dir"] = data_dir.rstrip("/")
     if recovery_admin_password:
         stalwart["recovery_admin_password"] = recovery_admin_password
@@ -62,7 +62,7 @@ def update_from_wizard(
     bulwark["enabled"] = bulwark_enabled
     bulwark["domain"] = bulwark_domain
     bulwark.setdefault("image", "ghcr.io/bulwarkmail/webmail")
-    bulwark.setdefault("tag", "1.7.5")
+    bulwark.setdefault("tag", "1.9.2")
     bulwark["data_dir"] = bulwark_data_dir.rstrip("/")
     bulwark.setdefault("app_name", "Webmail")
 
