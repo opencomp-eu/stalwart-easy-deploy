@@ -19,6 +19,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
+import backup_config  # noqa: E402
 import hostfs  # noqa: E402
 
 COMPOSE_DIR = PROJECT_ROOT / "compose"
@@ -118,6 +119,23 @@ def bulwark_enabled(config: dict) -> bool:
     return to_bool((config.get("bulwark") or {}).get("enabled", True))
 
 
+def backup_enabled(config: dict) -> bool:
+    return to_bool((config.get("backup") or {}).get("enabled", False))
+
+
+def backup_secret_keys(config: dict) -> tuple[str, ...]:
+    """Secrets generated for the shared backup pipeline when it is enabled."""
+    return ("BORG_PASSPHRASE",) if backup_enabled(config) else ()
+
+
+def validate_backup_config(path: Path | None = None) -> None:
+    """Validate the shared backup block when a deploy file is available."""
+    path = path or DEPLOY_PATH
+    if not path.exists():
+        return
+    backup_config.load_backup_settings(path)
+
+
 def public_url(config: dict) -> str:
     hostname = str((config.get("stalwart") or {}).get("hostname") or "").strip()
     return f"https://{hostname}"
@@ -213,6 +231,11 @@ def load_or_create_secrets(config: dict | None = None) -> dict:
 
     if not str(data.get("BULWARK_SESSION_SECRET") or "").strip():
         data["BULWARK_SESSION_SECRET"] = secrets.token_urlsafe(32)
+
+    if config is not None:
+        for key in backup_secret_keys(config):
+            if not str(data.get(key) or "").strip():
+                data[key] = secrets.token_urlsafe(32)
 
     save_yaml(SECRETS_PATH, data)
     SECRETS_PATH.chmod(0o600)
@@ -1265,6 +1288,7 @@ def apply_configuration(
 ) -> None:
     config = load_config()
     validate_config(config)
+    validate_backup_config(DEPLOY_PATH)
     secrets = load_or_create_secrets(config)
     if unlock_proxy:
         render_runtime_artifacts(config, secrets)
@@ -1279,6 +1303,28 @@ def apply_configuration(
     if not skip_runtime:
         reconcile_runtime(skip_pull=skip_pull)
     print_summary(config, secrets)
+    reconcile_backup_schedule(config)
+
+
+def reconcile_backup_schedule(config: dict) -> None:
+    """Reconcile the timer through backup.sh, which uses the emitted plan name."""
+    del config  # The script reloads deploy.yaml and emits the dynamic plan.
+    try:
+        result = subprocess.run(
+            ["bash", str(PROJECT_ROOT / "backup.sh"), "--schedule"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        print(f"Backup schedule: {detail.strip()}", file=sys.stderr)
+        return
+    message = result.stdout.strip() or "Automatic backup timer reconciled."
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+    print(f"Backup schedule: {message}")
 
 
 def main() -> None:

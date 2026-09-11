@@ -43,3 +43,27 @@ proxy:
   mode: standalone
   integrate:
     network: easydeploy-net
+
+# Optional Borg backup repository and automatic schedule.
+# Backups include this file, generated state, and configured data directories.
+backup:
+  enabled: false
+  repository:
+    type: local
+    path: /var/backups/stalwart
+    # For SFTP repositories, set type, host, user, path, and ssh_key_path.
+    # host: backup.example.com
+    # user: borg
+    # port: 22
+    # ssh_key_path: /root/.ssh/borg_backup
+    # host_key_check: true
+    encryption: repokey
+  schedule:
+    enabled: false
+    calendar: "*-*-* 03:00:00"
+    persistent: true
+  retention:
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+    keep_yearly: 0

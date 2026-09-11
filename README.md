@@ -56,6 +56,27 @@ Pin image tags in `deploy.yaml` (`stalwart.tag`, `bulwark.tag`) instead of float
 
 Set `bulwark.enabled: false` to run Stalwart without webmail.
 
+## Backups
+
+The optional `backup:` block in `deploy.yaml` configures Borg backups. The
+dynamic plan follows `stalwart.data_dir` and includes Bulwark data when
+`bulwark.enabled` is true, as well as `deploy.yaml` and generated state.
+Set `backup.enabled: true`, choose an absolute local repository path (or an
+SFTP repository), and run:
+
+```bash
+bash apply.sh
+bash backup.sh
+```
+
+Use `bash backup.sh --cold` when a consistent file-store snapshot is required.
+Portable exports are available with `bash backup.sh --export PATH`; add
+`--encrypt` to protect the export. Restore with
+`bash restore.sh --file PATH --yes` or from Borg with `--latest`/`--archive`.
+`bootstrap-from-backup.sh` installs dependencies and restores a portable file
+on a fresh VPS. Automatic backups use the configured `backup.schedule` systemd
+timer and are reconciled by `apply.sh`.
+
 ## TLS for IMAP/SMTP
 
 Caddy owns port 443, so Stalwart cannot complete HTTP-01 ACME for mail ports. After first boot, either:
