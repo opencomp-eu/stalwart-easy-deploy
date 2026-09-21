@@ -187,6 +187,7 @@ Finish the Stalwart setup wizard at `https://<mail-host>/admin` (disable HTTP-01
 ```bash
 bash apply.sh              # re-render config and reconcile stack
 bash apply.sh --skip-runtime   # render only, no docker
+bash update.sh             # git pull + images; prints "Nothing to update" if unchanged
 bash start.sh              # compose up (via apply, skip pull)
 bash stop.sh               # compose down
 ```

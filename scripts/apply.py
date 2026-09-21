@@ -1303,6 +1303,9 @@ def apply_configuration(
     render_runtime_artifacts(config, secrets)
     if not skip_runtime:
         reconcile_runtime(skip_pull=skip_pull)
+        from scripts.update import record_current_lock
+
+        record_current_lock()
     if not edlog.is_quiet():
         print_summary(config, secrets)
     reconcile_backup_schedule(config)
