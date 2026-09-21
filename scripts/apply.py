@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
 import backup_config  # noqa: E402
 import hostfs  # noqa: E402
+import edlog  # noqa: E402
 
 COMPOSE_DIR = PROJECT_ROOT / "compose"
 COMPOSE_PROJECT_NAME = "stalwart-easy-deploy"
@@ -1302,7 +1303,8 @@ def apply_configuration(
     render_runtime_artifacts(config, secrets)
     if not skip_runtime:
         reconcile_runtime(skip_pull=skip_pull)
-    print_summary(config, secrets)
+    if not edlog.is_quiet():
+        print_summary(config, secrets)
     reconcile_backup_schedule(config)
 
 
