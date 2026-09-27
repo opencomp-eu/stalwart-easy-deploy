@@ -365,12 +365,46 @@ def stalwart_caddy_block(
 }}"""
 
 
-def bulwark_caddy_block(domain: str) -> str:
+def https_origin(value: Any) -> str:
+    """Origin of an https URL, or empty when the value is not an https URL."""
+    text = str(value or "").strip()
+    if "://" not in text:
+        return ""
+    scheme, rest = text.split("://", 1)
+    if scheme.lower() != "https":
+        return ""
+    host = rest.split("/")[0].split("?")[0].split("#")[0].strip().lower()
+    if not host or any(char in host for char in " @\\"):
+        return ""
+    return f"https://{host}"
+
+
+def bulwark_idp_origin(config: dict) -> str:
+    """Kanidm (or other OIDC issuer) origin embedded Element must be allowed to load."""
+    identity = config.get("identity")
+    if not isinstance(identity, dict):
+        return ""
+    oidc = identity.get("oidc")
+    if not isinstance(oidc, dict):
+        return ""
+    return https_origin(str(oidc.get("issuer_url") or ""))
+
+
+def bulwark_caddy_block(domain: str, *, idp_origin: str = "") -> str:
     headers = _proxy_headers()
+    # Bulwark only puts sidebar-app origins in frame-src. Element's login
+    # navigates that iframe to the IdP, which the parent policy then blocks.
+    csp = ""
+    if idp_origin:
+        csp = (
+            "\n"
+            '        header_down Content-Security-Policy "frame-src \'self\' blob:" '
+            f'"frame-src \'self\' blob: {idp_origin}"'
+        )
     return f"""# stalwart-easy-deploy — webmail
 {domain} {{
     reverse_proxy bulwark:3000 {{
-        {headers}
+        {headers}{csp}
     }}
     encode gzip
     log
@@ -389,7 +423,7 @@ def site_blocks(config: dict) -> str:
             stalwart_caddy_block(
                 hostname, cors_origin=cors_origin, https_upstream=https_upstream
             ),
-            bulwark_caddy_block(webmail),
+            bulwark_caddy_block(webmail, idp_origin=bulwark_idp_origin(config)),
         ]
     )
 
@@ -465,6 +499,10 @@ def write_compose_env(config: dict, secrets: dict) -> None:
 
 
 def render_runtime_artifacts(config: dict, secrets: dict) -> None:
+    # Identity must be merged before the Caddy site is rendered: embedded
+    # Element navigates its iframe to the IdP, and that origin has to be in
+    # Bulwark's frame-src.
+    apply_engine_identity_sidecar(config)
     ensure_data_dirs(config)
     if proxy_mode(config) == "integrate":
         render_integration_fragment(config)

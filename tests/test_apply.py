@@ -169,6 +169,22 @@ def test_site_blocks_include_both_hosts():
     assert "handle @scan_ban" in text
     assert "handle_errors" not in text
     assert "https://stalwart:443" not in text
+    assert "frame-src" not in text
+
+
+def test_site_blocks_allow_idp_in_bulwark_frame_src():
+    config = _base_config(
+        identity={
+            "provider": "kanidm",
+            "oidc": {"issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui"},
+        }
+    )
+    text = site_blocks(config)
+    assert (
+        'header_down Content-Security-Policy "frame-src \'self\' blob:" '
+        '"frame-src \'self\' blob: https://idm.test.example"'
+    ) in text
+    assert "mail.test.example" in text
 
 
 def test_site_blocks_stay_on_http_after_wizard(tmp_path):

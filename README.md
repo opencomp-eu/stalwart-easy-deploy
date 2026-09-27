@@ -169,6 +169,10 @@ curl -sSI -H 'Origin: https://webmail.example.com' https://mail.example.com/.wel
 
 The 307 to `/jmap/session` must include `access-control-allow-origin: https://webmail.example.com` (not `*`). `curl -I` (HEAD) returns 404 here; use GET as above.
 
+### Element inside Bulwark never finishes login
+
+Bulwark allows the embedded app origin in `frame-src`, then Element redirects that iframe to Kanidm. The browser blocks `https://<identity-host>/ui/oauth2` until this kit rewrites Bulwark's policy to include the OIDC issuer, and Kanidm allows the webmail origin to frame the login page. Re-run engine `apply.sh` (or apply Stalwart and Kanidm, then the engine with `--skip-kits`).
+
 ### Bulwark: “Write permission denied on settings data directory”
 
 The image runs as UID **1001** (`nextjs`). `apply.sh` chowns `bulwark.data_dir` to that user. If you created the directory by hand as root, fix it once:
