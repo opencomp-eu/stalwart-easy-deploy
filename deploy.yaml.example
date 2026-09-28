@@ -33,8 +33,11 @@ ports:
 # Bulwark signs in through Kanidm OIDC. IMAP/SMTP use a Stalwart app password.
 # Set identity.auth_directory: ldap to bind IMAP with the Kanidm password instead.
 # Set identity.managed: false to keep Stalwart's internal directory.
+# Kanidm people with an email address are copied into each mailbox address book
+# every 5 minutes. Set identity.contacts: false to keep address books manual.
 # identity:
 #   provider: kanidm
+#   contacts: true
 
 proxy:
   type: caddy

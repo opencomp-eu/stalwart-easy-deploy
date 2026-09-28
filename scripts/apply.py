@@ -668,11 +668,23 @@ def _jmap_ok(response: dict, call_id: str) -> dict:
     raise RuntimeError(f"no JMAP response for {call_id}")
 
 
-def _jmap(config: dict, secrets: dict, method_calls: list, *, timeout: int = 15) -> dict:
+def recovery_admin_user(config: dict) -> str:
+    return str((config.get("stalwart") or {}).get("recovery_admin_user") or "admin").strip() or "admin"
+
+
+def _jmap(
+    config: dict,
+    secrets: dict,
+    method_calls: list,
+    *,
+    timeout: int = 15,
+    username: str | None = None,
+    using: list[str] | None = None,
+) -> dict:
     """POST JMAP via curl already in the stalwart image (localhost, no extra container)."""
-    user = str((config.get("stalwart") or {}).get("recovery_admin_user") or "admin").strip() or "admin"
+    user = username or recovery_admin_user(config)
     password = str(secrets.get("RECOVERY_ADMIN_PASSWORD") or "")
-    payload = json.dumps({"using": JMAP_USING, "methodCalls": method_calls})
+    payload = json.dumps({"using": using or JMAP_USING, "methodCalls": method_calls})
     last_error = "JMAP call failed"
     for url in JMAP_URLS:
         result = subprocess.run(
@@ -1269,6 +1281,9 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
     secrets = load_or_create_secrets(config)
     protect_caddy_from_autoban(config, secrets)
     apply_kanidm_directory(config, secrets)
+    from scripts.groupware import sync_groupware_locked
+
+    sync_groupware_locked(config, secrets)
 
 
 def print_summary(config: dict, secrets: dict) -> None:
@@ -1300,6 +1315,12 @@ def print_summary(config: dict, secrets: dict) -> None:
             print("                 Webmail signs in through Kanidm (passkey or session).")
             print("                 IMAP/SMTP: create a Stalwart app password in the admin UI.")
             print("                 New mailboxes appear after the first successful SSO.")
+    print("Calendar:        Calendar")
+    print("Address book:    Address Book")
+    from scripts.groupware import contacts_sync_enabled
+
+    if contacts_sync_enabled(config):
+        print("                 Kanidm people are added within 5 minutes, and removed with the account.")
     if bulwark_enabled(config):
         print(f"Webmail:         https://{config['bulwark']['domain']}")
     if proxy_mode(config) == "integrate":
@@ -1347,6 +1368,9 @@ def apply_configuration(
     if not edlog.is_quiet():
         print_summary(config, secrets)
     reconcile_backup_schedule(config)
+    from scripts.groupware import reconcile_contacts_schedule
+
+    reconcile_contacts_schedule(config)
 
 
 def reconcile_backup_schedule(config: dict) -> None:

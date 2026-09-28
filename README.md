@@ -48,7 +48,8 @@ After the stack is up:
 
 - **`deploy.yaml`** — operator settings (hostname, domains, image tags, ports).
 - **`.stalwart-easy-deploy/secrets.yaml`** — generated recovery password and Bulwark session secret (do not commit).
-- **Kanidm** (via easydeploy-engine) is the organisation directory. Bulwark signs in through Kanidm OIDC. IMAP/SMTP clients should use a Stalwart app password.
+- **Kanidm** (via easydeploy-engine) is the organisation directory. Bulwark signs in through Kanidm OIDC. IMAP/SMTP clients should use a Stalwart app password. People with an email address are copied into each mailbox address book every five minutes (and on `apply.sh`). Deleting the Kanidm person removes that contact. Contacts someone added by hand are left alone. Set `identity.contacts: false` to turn the sync off.
+- The default calendar is named **Calendar** and the default address book is named **Address Book**. Existing auto-created collections that still use the Stalwart names are renamed on the same pass.
 - **`/var/lib/stalwart`** (default) — Stalwart config (`etc/`) and mail data (`data/`).
 - **`/var/lib/bulwark`** (default) — Bulwark settings, admin config, and telemetry.
 

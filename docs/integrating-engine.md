@@ -31,6 +31,8 @@ On a same-VPS engine install, easydeploy-engine writes `.stalwart-easy-deploy/in
 
 The Kanidm portal **Webmail** tile lands on the Bulwark origin and starts the OIDC flow. New Kanidm people get a mailbox on first successful SSO; inbound mail before that first login depends on an existing Stalwart mailbox.
 
+After a mailbox exists, apply copies every Kanidm person who has an email address into that mailbox's address book, then a systemd timer repeats the copy every five minutes. Bob therefore sees Alice after Alice is created in Kanidm, without adding her by hand. Removing Alice from Kanidm removes her card. The sync marks its cards and does not edit or delete contacts that were added in the client. Set `identity.contacts: false` to disable it. The default calendar and address book display names are **Calendar** and **Address Book**.
+
 Set `identity.managed: false` to keep Stalwart's internal directory.
 
 See [easydeploy-engine/docs/integrated-vps.md](../easydeploy-engine/docs/integrated-vps.md).
