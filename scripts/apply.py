@@ -1304,7 +1304,7 @@ def print_summary(config: dict, secrets: dict) -> None:
     else:
         print("Caddy upstream:  http://stalwart:8080 (Caddy terminates TLS)")
     print(f"Secrets file:    {SECRETS_PATH}")
-    print(f"Recovery admin:  {recovery_user} / {secrets.get('RECOVERY_ADMIN_PASSWORD')}")
+    print(f"Recovery admin:  {recovery_user} (password: RECOVERY_ADMIN_PASSWORD in {SECRETS_PATH})")
     identity = config.get("identity") if isinstance(config.get("identity"), dict) else {}
     if str(identity.get("provider") or "").strip().lower() == "kanidm":
         if str(identity.get("auth_directory") or "oidc").strip().lower() == "ldap":
