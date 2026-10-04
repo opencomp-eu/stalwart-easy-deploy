@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,10 @@ from scripts.apply import (
     bulwark_oauth_env_lines,
     _directory_matches,
     derive_compose_files,
+    embedded_dns_missing,
     ensure_data_dirs,
+    repair_stack_networks,
+    stack_network_names,
     load_or_create_secrets,
     protect_caddy_from_autoban,
     public_url,
@@ -143,6 +147,69 @@ def test_derive_compose_files_integrate():
         "integrate.yml",
         "integrate-bulwark.yml",
     ]
+
+
+def test_stack_networks_include_proxy_in_integrate_mode():
+    standalone = _base_config()
+    assert stack_network_names(standalone) == ["stalwart-net"]
+    integrate = _base_config(proxy={"type": "caddy", "mode": "integrate"})
+    assert stack_network_names(integrate) == ["stalwart-net", "easydeploy-net"]
+
+
+def test_embedded_dns_missing_detects_host_stub():
+    host_stub = "nameserver 127.0.0.53\noptions edns0 trust-ad\n"
+    docker_dns = "nameserver 127.0.0.11\noptions edns0 trust-ad ndots:0\n"
+    assert embedded_dns_missing(host_stub) is True
+    assert embedded_dns_missing(docker_dns) is False
+    assert embedded_dns_missing("") is False
+
+
+def test_repair_stack_networks_attaches_missing_proxy_network(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "inspect"] and cmd[2] == "stalwart":
+            payload = [
+                {
+                    "HostConfig": {
+                        "NetworkMode": "none",
+                        "PortBindings": {"25/tcp": [{"HostIp": "", "HostPort": "25"}]},
+                    },
+                    "NetworkSettings": {"Networks": {}},
+                }
+            ]
+            return type("R", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})()
+        if cmd[:2] == ["docker", "inspect"] and cmd[2] == "bulwark":
+            payload = [
+                {
+                    "HostConfig": {"NetworkMode": "stalwart-net"},
+                    "NetworkSettings": {
+                        "Networks": {"stalwart-net": {}, "easydeploy-net": {}}
+                    },
+                }
+            ]
+            return type("R", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})()
+        if cmd[:3] == ["docker", "network", "connect"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if cmd[:2] == ["docker", "exec"]:
+            return type(
+                "R",
+                (),
+                {"returncode": 0, "stdout": "nameserver 127.0.0.53\n", "stderr": ""},
+            )()
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    config = _base_config(
+        proxy={"type": "caddy", "mode": "integrate"},
+        bulwark={"enabled": True, "domain": "webmail.test.example", "data_dir": "/var/lib/bulwark"},
+    )
+    assert repair_stack_networks(config) is True
+    connects = [cmd for cmd in calls if cmd[:3] == ["docker", "network", "connect"]]
+    assert ["docker", "network", "connect", "stalwart-net", "stalwart"] in connects
+    assert ["docker", "network", "connect", "easydeploy-net", "stalwart"] in connects
+    assert not any(cmd[4] == "bulwark" for cmd in connects)
 
 
 def test_derive_compose_files_integrate_without_bulwark():

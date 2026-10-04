@@ -527,6 +527,139 @@ def ensure_docker_network(name: str) -> None:
         subprocess.run(["docker", "network", "create", name], check=True)
 
 
+def stack_network_names(config: dict) -> list[str]:
+    """Networks the mail containers must share with each other and with Caddy."""
+    names = ["stalwart-net"]
+    if proxy_mode(config) == "integrate":
+        names.append(DEFAULT_INTEGRATE_NETWORK)
+    return names
+
+
+def embedded_dns_missing(resolv_conf: str) -> bool:
+    """True when a container is using the host stub resolver instead of Docker DNS.
+
+    127.0.0.53 is systemd-resolved on the VPS loopback. It answers on the host
+    and refuses connections from a container, so GitHub downloads and Stalwart's
+    own DNS lookups fail with "Temporary failure in name resolution".
+    """
+    text = resolv_conf.strip()
+    if not text:
+        return False
+    return "127.0.0.11" not in text
+
+
+def release_host_smtp() -> None:
+    """Stop Debian's Exim if it is holding port 25.
+
+    Cloud images often enable exim4. Stalwart then cannot publish SMTP, and a
+    failed bind has left the container up with no Docker network at all.
+    """
+    active = subprocess.run(
+        ["systemctl", "is-active", "exim4.service"],
+        capture_output=True,
+        text=True,
+    )
+    enabled = subprocess.run(
+        ["systemctl", "is-enabled", "exim4.service"],
+        capture_output=True,
+        text=True,
+    )
+    if (active.stdout or "").strip() != "active" and (enabled.stdout or "").strip() not in {
+        "enabled",
+        "enabled-runtime",
+    }:
+        return
+    print("Stopping host Exim so Stalwart can bind SMTP ports…")
+    subprocess.run(
+        ["systemctl", "disable", "--now", "exim4.service", "exim4.socket"],
+        check=False,
+    )
+
+
+def _inspect_container(name: str) -> dict | None:
+    result = subprocess.run(
+        ["docker", "inspect", name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+        return None
+    return payload[0]
+
+
+def _attached_networks(info: dict) -> set[str]:
+    networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
+    if not isinstance(networks, dict):
+        return set()
+    return set(networks)
+
+
+def _read_resolv_conf(container: str) -> str:
+    result = subprocess.run(
+        ["docker", "exec", container, "cat", "/etc/resolv.conf"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout or ""
+
+
+def repair_stack_networks(config: dict) -> bool:
+    """Attach mail containers to the proxy network. Return True if Stalwart needs a restart.
+
+    A container with published mail ports can come up with an empty network
+    list and the host resolver (127.0.0.53). Caddy is on easydeploy-net, so
+    the name `stalwart` does not resolve and https://mail…/ is HTTP 502.
+    """
+    required = stack_network_names(config)
+    targets = ["stalwart"]
+    if bulwark_enabled(config):
+        targets.append("bulwark")
+    for name in targets:
+        info = _inspect_container(name)
+        if info is None:
+            continue
+        mode = str((info.get("HostConfig") or {}).get("NetworkMode") or "")
+        attached = _attached_networks(info)
+        if mode == "host":
+            print(
+                f"{name} is on the host network, so other containers cannot resolve it. "
+                "Recreating it…"
+            )
+            run_compose("up", "-d", "--force-recreate", "--no-deps", "--wait", name)
+            info = _inspect_container(name) or {}
+            attached = _attached_networks(info)
+        for network in required:
+            if network in attached:
+                continue
+            print(f"Attaching {name} to {network}…")
+            connected = subprocess.run(
+                ["docker", "network", "connect", network, name],
+                capture_output=True,
+                text=True,
+            )
+            if connected.returncode != 0:
+                detail = ((connected.stderr or connected.stdout) or "").strip()
+                print(
+                    f"Warning: could not attach {name} to {network}: {detail}",
+                    file=sys.stderr,
+                )
+    if embedded_dns_missing(_read_resolv_conf("stalwart")):
+        print(
+            "Stalwart is using the host DNS stub. Restarting it so Docker DNS "
+            "(127.0.0.11) is installed."
+        )
+        return True
+    return False
+
+
 def docker_compose_cmd() -> list[str]:
     if shutil.which("docker"):
         result = subprocess.run(
@@ -1265,6 +1398,7 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
             )
         ensure_docker_network(DEFAULT_INTEGRATE_NETWORK)
         stop_standalone_caddy()
+    release_host_smtp()
     if not skip_pull:
         print("Pulling Stalwart stack images…")
         run_compose("pull")
@@ -1279,6 +1413,8 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
             "&& docker network rm stalwart-net then re-run apply.sh"
         ) from exc
     secrets = load_or_create_secrets(config)
+    if repair_stack_networks(config):
+        restart_stalwart_and_wait(config, secrets)
     protect_caddy_from_autoban(config, secrets)
     apply_kanidm_directory(config, secrets)
     from scripts.groupware import sync_groupware_locked
