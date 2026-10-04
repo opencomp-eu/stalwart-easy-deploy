@@ -1382,6 +1382,12 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         print("  Bulwark SSO uses Kanidm. IMAP/SMTP should use a Stalwart app password.")
     elif oidc_id:
         print("  Kanidm OIDC directory is registered but not selected (identity.auth_directory: ldap)")
+    # v0.16 keeps Authentication.directoryId in memory until ReloadSettings.
+    # Without this, Bulwark's Kanidm access token is decoded as a Stalwart
+    # token and webmail shows Authentication Failed.
+    if not reload_stalwart_security(config, secrets):
+        print("  Directory change did not hot-reload; restarting stalwart…")
+        restart_stalwart_and_wait(config, secrets)
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:

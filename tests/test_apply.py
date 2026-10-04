@@ -670,6 +670,8 @@ def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):
         if method == "x:Authentication/set":
             assert method_calls[0][1]["update"]["singleton"]["directoryId"] == "dir-kanidm"
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
@@ -726,6 +728,10 @@ def test_apply_kanidm_directory_selects_oidc_for_sso(tmp_path, monkeypatch):
         if method == "x:Authentication/set":
             selected.append(method_calls[0][1]["update"]["singleton"]["directoryId"])
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            created_action = next(iter(method_calls[0][1]["create"].values()))
+            reloads.append(created_action["@type"])
+            return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
@@ -734,8 +740,10 @@ def test_apply_kanidm_directory_selects_oidc_for_sso(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
 
     secrets: dict = {}
+    reloads: list[str] = []
     apply_kanidm_directory(_base_config(), secrets)
     assert created == ["kanidm", "kanidmOidc"]
+    assert "ReloadSettings" in reloads
     assert selected == ["dir-kanidmOidc"]
     assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidmOidc"
     assert secrets["KANIDM_LDAP_DIRECTORY_ID"] == "dir-kanidm"
@@ -779,6 +787,8 @@ def test_apply_kanidm_directory_defaults_to_oidc_when_present(tmp_path, monkeypa
         if method == "x:Authentication/set":
             selected.append(method_calls[0][1]["update"]["singleton"]["directoryId"])
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
@@ -870,6 +880,8 @@ def test_apply_kanidm_directory_reuses_url_and_destroys_duplicates(tmp_path, mon
             return {"methodResponses": [[method, {"created": {key: {"id": new_id}}}, cid]]}
         if method == "x:Authentication/set":
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
@@ -924,6 +936,8 @@ def test_apply_kanidm_directory_operator_can_keep_ldap(tmp_path, monkeypatch):
         if method == "x:Authentication/set":
             selected.append(method_calls[0][1]["update"]["singleton"]["directoryId"])
             return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
         raise AssertionError(method)
 
     monkeypatch.setattr("scripts.apply.IDENTITY_SIDECAR", sidecar)
