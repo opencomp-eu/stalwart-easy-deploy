@@ -10,7 +10,7 @@ import yaml
 
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
-    activate_persisted_oidc,
+    _docker_time_to_epoch,
     address_is_docker_lan,
     apply_engine_identity_sidecar,
     apply_kanidm_directory,
@@ -22,8 +22,8 @@ from scripts.apply import (
     derive_compose_files,
     compose_file_paths,
     embedded_dns_missing,
+    ensure_oidc_directory_live,
     idp_hostname,
-    reload_identity,
     render_idp_hosts_overlay,
     ensure_data_dirs,
     repair_stack_networks,
@@ -182,59 +182,151 @@ def test_idp_hosts_overlay_pins_issuer_on_stalwart_only(tmp_path, monkeypatch):
 
 
 def _isolate_oidc_activation(monkeypatch, tmp_path: Path) -> Path:
-    """Keep directory tests off the real pending marker and the local Docker daemon."""
-    pending = tmp_path / "oidc-reload.pending"
-    monkeypatch.setattr("scripts.apply.OIDC_PENDING_PATH", pending)
-    monkeypatch.setattr("scripts.apply.stalwart_directory_error", lambda *_args: "")
-    return pending
+    """Keep directory tests off the real state file and the local Docker daemon."""
+    state = tmp_path / "oidc-live.json"
+    monkeypatch.setattr("scripts.apply.OIDC_STATE_PATH", state)
+    monkeypatch.setattr("scripts.apply._inspect_container", lambda _name: None)
+    return state
 
 
-def _discovery_fails(monkeypatch) -> list[int]:
-    monkeypatch.setattr("scripts.apply.reload_stalwart_security", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(
-        "scripts.apply.stalwart_directory_error",
-        lambda *_args: "Discovery fetch failed: error sending request",
+OIDC_SECRETS = {"KANIDM_OIDC_DIRECTORY_ID": "oidc-1", "KANIDM_DIRECTORY_ID": "oidc-1"}
+
+
+def _oidc_config() -> dict:
+    return _base_config(
+        identity={
+            "provider": "kanidm",
+            "oidc": {"issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui"},
+        }
     )
-    slept: list[int] = []
-    monkeypatch.setattr("scripts.apply.time.sleep", lambda seconds: slept.append(seconds))
-    return slept
 
 
-def test_kit_apply_warns_when_discovery_is_not_reachable_yet(tmp_path, monkeypatch, capsys):
-    pending = _isolate_oidc_activation(monkeypatch, tmp_path)
-    slept = _discovery_fails(monkeypatch)
-    activate_persisted_oidc(_base_config(), {}, attempts=1, strict=False)
-    assert slept == []
-    assert "not reachable yet" in capsys.readouterr().err
-    assert pending.is_file()
+class FakeStalwart:
+    """Container state seen by ensure_oidc_directory_live."""
+
+    def __init__(self, monkeypatch, tmp_path: Path, *, reachable=True, reload_ok=False):
+        self.state_path = tmp_path / "oidc-live.json"
+        self.started = "2026-10-05T21:00:00.123456789Z"
+        self.reachable = reachable
+        self.reload_ok = reload_ok
+        self.build_error = ""
+        self.restart_error = ""
+        self.calls: list[str] = []
+        self.wait_file: list[str] = []
+        monkeypatch.setattr("scripts.apply.OIDC_STATE_PATH", self.state_path)
+        monkeypatch.setattr("scripts.apply._inspect_container", lambda _name: {"State": {}})
+        monkeypatch.setattr("scripts.apply.stalwart_started_at", lambda: self.started)
+        monkeypatch.setattr("scripts.apply.stalwart_fetch", self._fetch)
+        monkeypatch.setattr("scripts.apply.time.sleep", lambda _seconds: None)
+        monkeypatch.setattr("scripts.apply.reload_stalwart_security", self._reload)
+        monkeypatch.setattr("scripts.apply.restart_stalwart_and_wait", self._restart)
+        monkeypatch.setattr("scripts.apply.stalwart_directory_error", self._directory_error)
+        monkeypatch.setattr("scripts.apply.set_startup_idp_wait", self.wait_file.append)
+
+    def _fetch(self, url):
+        self.calls.append(f"fetch {url}")
+        return (True, "") if self.reachable else (False, "Failed to connect to idm.test.example")
+
+    def _reload(self, *_args, **_kwargs):
+        self.calls.append("reload")
+        return self.reload_ok
+
+    def _restart(self, *_args, **_kwargs):
+        self.calls.append("restart")
+        self.started = "2026-10-05T21:05:00.5Z"
+        self.build_error = self.restart_error
+        return True
+
+    def _directory_error(self, started_at):
+        self.calls.append(f"logs {started_at}")
+        return self.build_error
+
+    def record(self, directory_id="oidc-1", started_at=None):
+        self.state_path.write_text(
+            json.dumps({"directory_id": directory_id, "started_at": started_at or self.started})
+        )
 
 
-def test_reload_identity_retries_then_raises(tmp_path, monkeypatch):
-    pending = _isolate_oidc_activation(monkeypatch, tmp_path)
-    slept = _discovery_fails(monkeypatch)
+def test_kit_apply_warns_when_discovery_is_unreachable(tmp_path, monkeypatch, capsys):
+    fake = FakeStalwart(monkeypatch, tmp_path, reachable=False)
+    assert not ensure_oidc_directory_live(
+        _oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=False
+    )
+    err = capsys.readouterr().err
+    assert "unreachable from the stalwart container" in err
+    assert "Failed to connect" in err
+    assert "reload" not in fake.calls and "restart" not in fake.calls
+    assert fake.wait_file == []
+
+
+def test_reload_identity_raises_when_discovery_stays_unreachable(tmp_path, monkeypatch):
+    FakeStalwart(monkeypatch, tmp_path, reachable=False)
     with pytest.raises(RuntimeError, match="could not load the Kanidm OIDC directory"):
-        activate_persisted_oidc(_base_config(), {}, attempts=6, strict=True)
-    assert len(slept) == 5
-    assert pending.is_file()
+        ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
 
 
-def test_successful_reload_clears_pending_marker(tmp_path, monkeypatch):
-    pending = _isolate_oidc_activation(monkeypatch, tmp_path)
-    pending.write_text("pending\n")
-    monkeypatch.setattr("scripts.apply.reload_stalwart_security", lambda *_args, **_kwargs: True)
-    activate_persisted_oidc(_base_config(), {}, attempts=6, strict=True)
-    assert not pending.exists()
+def test_verified_directory_for_this_container_is_left_alone(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path)
+    fake.record()
+    assert ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert "reload" not in fake.calls and "restart" not in fake.calls
+    assert fake.wait_file == ["https://idm.test.example/oauth2/openid/stalwart-webui/.well-known/openid-configuration"]
 
 
-def test_reload_identity_skips_when_nothing_is_pending(tmp_path, monkeypatch, capsys):
-    _isolate_oidc_activation(monkeypatch, tmp_path)
+def test_restarted_container_with_clean_startup_is_trusted(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path)
+    fake.record(started_at="2026-10-04T08:00:00Z")
+    assert ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert "reload" not in fake.calls and "restart" not in fake.calls
+    assert json.loads(fake.state_path.read_text())["started_at"] == fake.started
 
-    def unexpected(*_args, **_kwargs):
-        raise AssertionError("must not touch Stalwart")
 
-    monkeypatch.setattr("scripts.apply.load_config", unexpected)
-    reload_identity()
-    assert "already loaded" in capsys.readouterr().out
+def test_startup_build_error_triggers_reload(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path, reload_ok=True)
+    fake.record(started_at="2026-10-04T08:00:00Z")
+    fake.build_error = "Discovery fetch failed: error sending request"
+    assert ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert "reload" in fake.calls and "restart" not in fake.calls
+
+
+def test_refused_reload_falls_back_to_restart(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path, reload_ok=False)
+    assert ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert fake.calls.index("reload") < fake.calls.index("restart")
+    saved = json.loads(fake.state_path.read_text())
+    assert saved == {"directory_id": "oidc-1", "started_at": "2026-10-05T21:05:00.5Z"}
+
+
+def test_restart_that_still_fails_discovery_raises(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path, reload_ok=False)
+    fake.restart_error = "Discovery fetch failed: error sending request"
+    with pytest.raises(RuntimeError, match="Discovery fetch failed"):
+        ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert not fake.state_path.exists()
+
+
+def test_ldap_selection_clears_oidc_state_and_startup_wait(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path)
+    fake.record()
+    secrets = {"KANIDM_OIDC_DIRECTORY_ID": "oidc-1", "KANIDM_DIRECTORY_ID": "ldap-1"}
+    assert ensure_oidc_directory_live(_oidc_config(), secrets, wait_seconds=0, strict=True)
+    assert not fake.state_path.exists()
+    assert fake.wait_file == [""]
+    assert fake.calls == []
+
+
+def test_docker_time_to_epoch_drops_nanoseconds():
+    assert _docker_time_to_epoch("2026-10-05T21:00:00.123456789Z") == 1791234000
+    assert _docker_time_to_epoch("") == 0
+
+
+def test_compose_waits_for_idp_before_starting_stalwart():
+    compose = yaml.safe_load((Path(__file__).resolve().parent.parent / "compose" / "docker-compose.yml").read_text())
+    service = compose["services"]["stalwart"]
+    script = service["entrypoint"][2]
+    assert "/etc/stalwart/easydeploy-idp-wait" in script
+    assert 'exec /usr/local/bin/stalwart "$$@"' in script
+    assert service["command"] == ["--config", "/etc/stalwart/config.json"]
 
 
 def test_stack_networks_include_proxy_in_integrate_mode():
@@ -828,12 +920,18 @@ def test_apply_kanidm_directory_selects_oidc_for_sso(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
     _isolate_oidc_activation(monkeypatch, tmp_path)
+    activations: list[dict] = []
+    monkeypatch.setattr(
+        "scripts.apply.ensure_oidc_directory_live",
+        lambda _config, _secrets, **kwargs: activations.append(kwargs) or False,
+    )
 
     secrets: dict = {}
     reloads: list[str] = []
     apply_kanidm_directory(_base_config(), secrets)
     assert created == ["kanidm", "kanidmOidc"]
-    assert "ReloadSettings" in reloads
+    assert reloads == []
+    assert activations == [{"wait_seconds": 0, "strict": False}]
     assert selected == ["dir-kanidmOidc"]
     assert secrets["KANIDM_DIRECTORY_ID"] == "dir-kanidmOidc"
     assert secrets["KANIDM_LDAP_DIRECTORY_ID"] == "dir-kanidm"

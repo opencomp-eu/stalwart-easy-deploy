@@ -34,7 +34,8 @@ CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
-OIDC_PENDING_PATH = STATE_DIR / "oidc-reload.pending"
+OIDC_STATE_PATH = STATE_DIR / "oidc-live.json"
+IDP_WAIT_FILE = "/etc/stalwart/easydeploy-idp-wait"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 # Docker user-defined bridges (172.16-31) plus other container/private ranges.
 DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
@@ -964,7 +965,7 @@ def complete_bootstrap(config: dict, secrets: dict) -> bool:
     return True
 
 
-def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 30) -> bool:
+def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 60) -> bool:
     subprocess.run(["docker", "restart", "stalwart"], check=False, capture_output=True)
     for _ in range(attempts):
         time.sleep(2)
@@ -984,7 +985,7 @@ def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 30
     return False
 
 
-def reload_stalwart_security(config: dict, secrets: dict) -> bool:
+def reload_stalwart_security(config: dict, secrets: dict, *, warn: bool = True) -> bool:
     """Reload settings and IP caches after API writes.
 
     Stalwart v0.16 persists registry changes without necessarily refreshing
@@ -1022,7 +1023,10 @@ def reload_stalwart_security(config: dict, secrets: dict) -> bool:
                 raise RuntimeError(str(not_created))
             print(f"  reloaded {label}")
         except RuntimeError as exc:
-            print(f"Warning: could not reload {label}: {exc}", file=sys.stderr)
+            if warn:
+                print(f"Warning: could not reload {label}: {exc}", file=sys.stderr)
+            else:
+                print(f"  could not reload {label}: {str(exc)[:300]}")
             return False
     return True
 
@@ -1415,90 +1419,237 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         print("  Bulwark SSO uses Kanidm. IMAP/SMTP should use a Stalwart app password.")
     elif oidc_id:
         print("  Kanidm OIDC directory is registered but not selected (identity.auth_directory: ldap)")
-    # v0.16 builds the OIDC directory, and downloads its discovery document,
-    # only when settings reload. On a fresh engine run that download cannot
-    # succeed until shared Caddy is up, which happens after this kit.
-    activate_persisted_oidc(config, secrets, attempts=1, strict=False)
-
-
-def activate_persisted_oidc(
-    config: dict, secrets: dict, *, attempts: int, strict: bool
-) -> None:
-    """Reload Stalwart so the saved Kanidm directory is actually loaded.
-
-    Kit apply calls this with ``strict=False``: the IdP hostname may not be
-    served by Caddy yet, so a discovery failure only leaves a pending marker.
-    ``apply.sh --reload-identity`` retries after Caddy is up and fails if
-    discovery still cannot be fetched.
-    """
-    since = str(int(time.time()))
-    failure = ""
-    for attempt in range(max(attempts, 1)):
-        if reload_stalwart_security(config, secrets):
-            OIDC_PENDING_PATH.unlink(missing_ok=True)
-            return
-        failure = stalwart_directory_error(since)
-        if failure and attempt + 1 < attempts:
-            print("  OIDC discovery is not ready yet; retrying…")
-            time.sleep(5)
-            continue
-        break
-    if not failure:
-        print("  Directory change did not hot-reload; restarting stalwart…")
-        if not restart_stalwart_and_wait(config, secrets):
-            raise RuntimeError("Stalwart did not come back after the directory reload")
-        failure = stalwart_directory_error(since)
-    if not failure:
-        OIDC_PENDING_PATH.unlink(missing_ok=True)
+    if not use_oidc:
+        # v0.16 keeps Authentication.directoryId in memory until settings reload.
+        if not reload_stalwart_security(config, secrets):
+            print("  Directory change did not hot-reload; restarting stalwart…")
+            if not restart_stalwart_and_wait(config, secrets):
+                raise RuntimeError("Stalwart did not come back after the directory reload")
+        ensure_oidc_directory_live(config, secrets, wait_seconds=0, strict=False)
         return
-    OIDC_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OIDC_PENDING_PATH.write_text("pending\n")
-    if strict:
-        raise RuntimeError(
-            "Stalwart could not load the Kanidm OIDC directory, so webmail "
-            f"cannot accept its tokens: {failure}"
-        )
-    print(
-        "Warning: Kanidm OIDC discovery is not reachable yet. "
-        "Stalwart will load it after Caddy is serving the identity hostname "
-        "(easydeploy-engine does this automatically; otherwise run "
-        "bash apply.sh --reload-identity).",
-        file=sys.stderr,
-    )
+    # On a fresh engine run the IdP hostname is not served until shared Caddy
+    # starts after this kit, so only one quick attempt is made here.
+    ensure_oidc_directory_live(config, secrets, wait_seconds=0, strict=False)
 
 
-def reload_identity() -> None:
-    """Load the already saved OIDC directory once Caddy can answer for it."""
-    if not OIDC_PENDING_PATH.is_file():
-        print("Kanidm directory is already loaded.")
-        return
-    if _inspect_container("stalwart") is None:
-        print("Stalwart is not running; skipping identity reload.")
-        return
-    config = load_config()
-    secrets = load_or_create_secrets(config)
-    print("Reloading the Kanidm directory now that Caddy is up…")
-    activate_persisted_oidc(config, secrets, attempts=6, strict=True)
+def oidc_discovery_url(config: dict) -> str:
+    identity = config.get("identity") if isinstance(config.get("identity"), dict) else {}
+    oidc = identity.get("oidc") if isinstance(identity.get("oidc"), dict) else {}
+    issuer = str(oidc.get("issuer_url") or "").strip().rstrip("/")
+    if not issuer:
+        return ""
+    return f"{issuer}/.well-known/openid-configuration"
 
 
-def stalwart_directory_error(since: str = "90s") -> str:
-    """Log line since ``since`` showing the OIDC directory failed to build."""
+def stalwart_fetch(url: str) -> tuple[bool, str]:
+    """GET ``url`` from inside the stalwart container, the same route Stalwart uses."""
     result = subprocess.run(
-        ["docker", "logs", "--since", since, "stalwart"],
+        [
+            "docker",
+            "exec",
+            "stalwart",
+            "curl",
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "8",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    status = (result.stdout or "").strip()
+    if result.returncode == 0 and status == "200":
+        return True, ""
+    detail = (result.stderr or "").strip()
+    if result.returncode == 0:
+        detail = f"HTTP {status}"
+    return False, detail or f"curl exited {result.returncode}"
+
+
+def wait_for_discovery(url: str, wait_seconds: int) -> tuple[bool, str]:
+    deadline = time.monotonic() + max(wait_seconds, 0)
+    while True:
+        ok, detail = stalwart_fetch(url)
+        if ok or time.monotonic() >= deadline:
+            return ok, detail
+        time.sleep(3)
+
+
+def stalwart_started_at() -> str:
+    info = _inspect_container("stalwart") or {}
+    return str((info.get("State") or {}).get("StartedAt") or "")
+
+
+def _docker_time_to_epoch(value: str) -> int:
+    """Whole seconds for a Docker RFC 3339 timestamp (nanoseconds are dropped)."""
+    from datetime import datetime, timezone
+
+    stamp = value.strip()[:19]
+    try:
+        parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return 0
+    return int(parsed.replace(tzinfo=timezone.utc).timestamp())
+
+
+OIDC_BUILD_ERRORS = (
+    "Discovery fetch failed",
+    "Discovery HTTP error",
+    "Discovery JSON parse error",
+    "Issuer mismatch",
+    "JWKS fetch failed",
+    "JWKS HTTP error",
+    "JWKS contains no usable keys",
+    "Default directory with ID",
+)
+
+
+def stalwart_directory_error(started_at: str) -> str:
+    """OIDC directory build error logged while the current container started."""
+    start = _docker_time_to_epoch(started_at)
+    if not start:
+        return ""
+    result = subprocess.run(
+        [
+            "docker",
+            "logs",
+            "--since",
+            str(start - 1),
+            "--until",
+            str(start + 300),
+            "stalwart",
+        ],
         capture_output=True,
         text=True,
     )
     text = f"{result.stdout or ''}\n{result.stderr or ''}"
-    needles = (
-        "Discovery fetch failed",
-        "Discovery HTTP error",
-        "Issuer mismatch",
-        "Default directory with ID",
-    )
     for line in text.splitlines():
-        if any(needle in line for needle in needles):
+        if any(needle in line for needle in OIDC_BUILD_ERRORS):
             return line.strip()
     return ""
+
+
+def _load_oidc_state() -> dict:
+    if not OIDC_STATE_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(OIDC_STATE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _record_oidc_live(directory_id: str, started_at: str) -> None:
+    OIDC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OIDC_STATE_PATH.write_text(
+        json.dumps({"directory_id": directory_id, "started_at": started_at}) + "\n"
+    )
+
+
+def set_startup_idp_wait(url: str) -> None:
+    """Make Stalwart wait for ``url`` at startup (see compose entrypoint)."""
+    if url:
+        subprocess.run(
+            ["docker", "exec", "-i", "stalwart", "sh", "-c", f"cat > {IDP_WAIT_FILE}"],
+            input=url + "\n",
+            capture_output=True,
+            text=True,
+        )
+    else:
+        subprocess.run(
+            ["docker", "exec", "stalwart", "rm", "-f", IDP_WAIT_FILE],
+            capture_output=True,
+        )
+
+
+def ensure_oidc_directory_live(
+    config: dict, secrets: dict, *, wait_seconds: int, strict: bool
+) -> bool:
+    """Make the selected Kanidm OIDC directory the one Stalwart is actually using.
+
+    Stalwart fetches OIDC discovery only while building its directories and
+    never retries. ReloadSettings rebuilds them, but refuses to swap in the
+    result if any object in the registry has a build error, even an unrelated
+    one. A restart always rebuilds. So: confirm discovery is reachable from
+    inside the container, try a reload, and fall back to a restart verified
+    from the startup log.
+
+    ``strict`` raises instead of warning. Kit apply is not strict because the
+    IdP hostname may not be served yet; ``apply.sh --reload-identity`` is.
+    """
+    apply_engine_identity_sidecar(config)
+    oidc_id = str(secrets.get("KANIDM_OIDC_DIRECTORY_ID") or "")
+    selected = str(secrets.get("KANIDM_DIRECTORY_ID") or "")
+    url = oidc_discovery_url(config)
+    if _inspect_container("stalwart") is None:
+        return True
+    if not oidc_id or selected != oidc_id or not url:
+        OIDC_STATE_PATH.unlink(missing_ok=True)
+        set_startup_idp_wait("")
+        return True
+
+    def not_live(reason: str) -> bool:
+        OIDC_STATE_PATH.unlink(missing_ok=True)
+        message = (
+            "Stalwart could not load the Kanidm OIDC directory, so webmail "
+            f"cannot accept its tokens: {reason}"
+        )
+        if strict:
+            raise RuntimeError(message)
+        print(
+            f"Warning: {message}\n"
+            "  This is expected before shared Caddy serves the identity hostname. "
+            "easydeploy-engine retries after Caddy starts "
+            "(or run: bash apply.sh --reload-identity).",
+            file=sys.stderr,
+        )
+        return False
+
+    ok, detail = wait_for_discovery(url, wait_seconds)
+    if not ok:
+        return not_live(f"{url} is unreachable from the stalwart container ({detail})")
+    set_startup_idp_wait(url)
+
+    started = stalwart_started_at()
+    state = _load_oidc_state()
+    if state.get("directory_id") == oidc_id:
+        if state.get("started_at") == started:
+            return True
+        # The directory was already selected before this container started,
+        # so its startup build is authoritative.
+        if started and not stalwart_directory_error(started):
+            _record_oidc_live(oidc_id, started)
+            return True
+
+    print("Loading the Kanidm OIDC directory in Stalwart…")
+    if reload_stalwart_security(config, secrets, warn=False):
+        _record_oidc_live(oidc_id, started)
+        return True
+    print("  Settings reload was refused; restarting stalwart so the directory is rebuilt…")
+    if not restart_stalwart_and_wait(config, secrets):
+        return not_live("stalwart did not come back after the restart")
+    started = stalwart_started_at()
+    failure = stalwart_directory_error(started)
+    if failure:
+        return not_live(failure)
+    _record_oidc_live(oidc_id, started)
+    print("  Kanidm OIDC directory is loaded")
+    return True
+
+
+def reload_identity() -> None:
+    """Load the saved Kanidm directory once Caddy serves the identity hostname."""
+    if not SECRETS_PATH.is_file() or _inspect_container("stalwart") is None:
+        return
+    config = load_config()
+    secrets = load_or_create_secrets(config)
+    ensure_oidc_directory_live(config, secrets, wait_seconds=60, strict=True)
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:
