@@ -10,6 +10,7 @@ import yaml
 
 from scripts.apply import (
     COMPOSE_PROJECT_NAME,
+    activate_persisted_oidc,
     address_is_docker_lan,
     apply_engine_identity_sidecar,
     apply_kanidm_directory,
@@ -22,6 +23,7 @@ from scripts.apply import (
     compose_file_paths,
     embedded_dns_missing,
     idp_hostname,
+    reload_identity,
     render_idp_hosts_overlay,
     ensure_data_dirs,
     repair_stack_networks,
@@ -163,7 +165,7 @@ def test_idp_hostname_strips_scheme_and_path():
     assert idp_hostname(_base_config()) == ""
 
 
-def test_idp_hosts_overlay_pins_issuer_to_host_gateway(tmp_path, monkeypatch):
+def test_idp_hosts_overlay_pins_issuer_on_stalwart_only(tmp_path, monkeypatch):
     overlay = tmp_path / "network-fixups.yml"
     monkeypatch.setattr("scripts.apply.NETWORK_OVERLAY_PATH", overlay)
     config = _base_config(
@@ -177,6 +179,62 @@ def test_idp_hosts_overlay_pins_issuer_to_host_gateway(tmp_path, monkeypatch):
     assert data["services"]["stalwart"]["extra_hosts"] == ["idm.test.example:host-gateway"]
     assert "bulwark" not in data["services"]
     assert overlay in compose_file_paths(config)
+
+
+def _isolate_oidc_activation(monkeypatch, tmp_path: Path) -> Path:
+    """Keep directory tests off the real pending marker and the local Docker daemon."""
+    pending = tmp_path / "oidc-reload.pending"
+    monkeypatch.setattr("scripts.apply.OIDC_PENDING_PATH", pending)
+    monkeypatch.setattr("scripts.apply.stalwart_directory_error", lambda *_args: "")
+    return pending
+
+
+def _discovery_fails(monkeypatch) -> list[int]:
+    monkeypatch.setattr("scripts.apply.reload_stalwart_security", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "scripts.apply.stalwart_directory_error",
+        lambda *_args: "Discovery fetch failed: error sending request",
+    )
+    slept: list[int] = []
+    monkeypatch.setattr("scripts.apply.time.sleep", lambda seconds: slept.append(seconds))
+    return slept
+
+
+def test_kit_apply_warns_when_discovery_is_not_reachable_yet(tmp_path, monkeypatch, capsys):
+    pending = _isolate_oidc_activation(monkeypatch, tmp_path)
+    slept = _discovery_fails(monkeypatch)
+    activate_persisted_oidc(_base_config(), {}, attempts=1, strict=False)
+    assert slept == []
+    assert "not reachable yet" in capsys.readouterr().err
+    assert pending.is_file()
+
+
+def test_reload_identity_retries_then_raises(tmp_path, monkeypatch):
+    pending = _isolate_oidc_activation(monkeypatch, tmp_path)
+    slept = _discovery_fails(monkeypatch)
+    with pytest.raises(RuntimeError, match="could not load the Kanidm OIDC directory"):
+        activate_persisted_oidc(_base_config(), {}, attempts=6, strict=True)
+    assert len(slept) == 5
+    assert pending.is_file()
+
+
+def test_successful_reload_clears_pending_marker(tmp_path, monkeypatch):
+    pending = _isolate_oidc_activation(monkeypatch, tmp_path)
+    pending.write_text("pending\n")
+    monkeypatch.setattr("scripts.apply.reload_stalwart_security", lambda *_args, **_kwargs: True)
+    activate_persisted_oidc(_base_config(), {}, attempts=6, strict=True)
+    assert not pending.exists()
+
+
+def test_reload_identity_skips_when_nothing_is_pending(tmp_path, monkeypatch, capsys):
+    _isolate_oidc_activation(monkeypatch, tmp_path)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("must not touch Stalwart")
+
+    monkeypatch.setattr("scripts.apply.load_config", unexpected)
+    reload_identity()
+    assert "already loaded" in capsys.readouterr().out
 
 
 def test_stack_networks_include_proxy_in_integrate_mode():
@@ -708,6 +766,7 @@ def test_apply_kanidm_directory_creates_and_selects(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
     monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    _isolate_oidc_activation(monkeypatch, tmp_path)
 
     secrets: dict = {}
     apply_kanidm_directory(_base_config(), secrets)
@@ -768,6 +827,7 @@ def test_apply_kanidm_directory_selects_oidc_for_sso(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
     monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    _isolate_oidc_activation(monkeypatch, tmp_path)
 
     secrets: dict = {}
     reloads: list[str] = []
@@ -825,6 +885,7 @@ def test_apply_kanidm_directory_defaults_to_oidc_when_present(tmp_path, monkeypa
     monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
     monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    _isolate_oidc_activation(monkeypatch, tmp_path)
 
     secrets: dict = {}
     apply_kanidm_directory(_base_config(), secrets)
@@ -918,6 +979,7 @@ def test_apply_kanidm_directory_reuses_url_and_destroys_duplicates(tmp_path, mon
     monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
     monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    _isolate_oidc_activation(monkeypatch, tmp_path)
 
     secrets: dict = {}
     apply_kanidm_directory(_base_config(), secrets)
@@ -974,6 +1036,7 @@ def test_apply_kanidm_directory_operator_can_keep_ldap(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.apply.SECRETS_PATH", secrets_path)
     monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
     monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    _isolate_oidc_activation(monkeypatch, tmp_path)
 
     secrets: dict = {}
     apply_kanidm_directory(_base_config(identity={"auth_directory": "ldap"}), secrets)

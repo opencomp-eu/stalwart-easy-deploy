@@ -34,6 +34,7 @@ CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
+OIDC_PENDING_PATH = STATE_DIR / "oidc-reload.pending"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 # Docker user-defined bridges (172.16-31) plus other container/private ranges.
 DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
@@ -225,15 +226,11 @@ def idp_hostname(config: dict) -> str:
 
 
 def render_idp_hosts_overlay(config: dict) -> None:
-    """Send the IdP hostname to the host gateway so Stalwart can fetch OIDC metadata.
+    """Let Stalwart reach the public IdP name without changing Bulwark's DNS.
 
-    The issuer in the Kanidm token is the public https URL. Stalwart must download
-    that discovery document to install the OIDC directory. From inside the container
-    the public address often is not reachable, discovery fails, and the directory
-    never becomes the default. Webmail then rejects the token as an internal one.
-
-    Bulwark must keep public DNS for the same hostname. It refuses OAuth metadata
-    whose endpoints resolve to a private address, which is what host-gateway is.
+    Bulwark refuses OAuth metadata whose endpoints resolve to a private address,
+    so this pin is only on Stalwart. host-gateway reaches Caddy's published
+    443, the same route OpenCloud uses for the IdP.
     """
     host = idp_hostname(config)
     stalwart: dict[str, Any] = {}
@@ -1418,26 +1415,76 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
         print("  Bulwark SSO uses Kanidm. IMAP/SMTP should use a Stalwart app password.")
     elif oidc_id:
         print("  Kanidm OIDC directory is registered but not selected (identity.auth_directory: ldap)")
-    # v0.16 keeps Authentication.directoryId in memory until ReloadSettings.
-    # OpenIdDirectory::open also fetches the issuer during that reload. If the
-    # fetch fails, the directory is dropped and bearer tokens hit the internal
-    # decoder ("Failed to decode token").
-    if not reload_stalwart_security(config, secrets):
+    # v0.16 builds the OIDC directory, and downloads its discovery document,
+    # only when settings reload. On a fresh engine run that download cannot
+    # succeed until shared Caddy is up, which happens after this kit.
+    activate_persisted_oidc(config, secrets, attempts=1, strict=False)
+
+
+def activate_persisted_oidc(
+    config: dict, secrets: dict, *, attempts: int, strict: bool
+) -> None:
+    """Reload Stalwart so the saved Kanidm directory is actually loaded.
+
+    Kit apply calls this with ``strict=False``: the IdP hostname may not be
+    served by Caddy yet, so a discovery failure only leaves a pending marker.
+    ``apply.sh --reload-identity`` retries after Caddy is up and fails if
+    discovery still cannot be fetched.
+    """
+    since = str(int(time.time()))
+    failure = ""
+    for attempt in range(max(attempts, 1)):
+        if reload_stalwart_security(config, secrets):
+            OIDC_PENDING_PATH.unlink(missing_ok=True)
+            return
+        failure = stalwart_directory_error(since)
+        if failure and attempt + 1 < attempts:
+            print("  OIDC discovery is not ready yet; retrying…")
+            time.sleep(5)
+            continue
+        break
+    if not failure:
         print("  Directory change did not hot-reload; restarting stalwart…")
         if not restart_stalwart_and_wait(config, secrets):
             raise RuntimeError("Stalwart did not come back after the directory reload")
-        failure = stalwart_directory_error()
-        if failure:
-            raise RuntimeError(
-                "Stalwart could not load the Kanidm OIDC directory, so webmail "
-                f"cannot accept its tokens: {failure}"
-            )
+        failure = stalwart_directory_error(since)
+    if not failure:
+        OIDC_PENDING_PATH.unlink(missing_ok=True)
+        return
+    OIDC_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OIDC_PENDING_PATH.write_text("pending\n")
+    if strict:
+        raise RuntimeError(
+            "Stalwart could not load the Kanidm OIDC directory, so webmail "
+            f"cannot accept its tokens: {failure}"
+        )
+    print(
+        "Warning: Kanidm OIDC discovery is not reachable yet. "
+        "Stalwart will load it after Caddy is serving the identity hostname "
+        "(easydeploy-engine does this automatically; otherwise run "
+        "bash apply.sh --reload-identity).",
+        file=sys.stderr,
+    )
 
 
-def stalwart_directory_error() -> str:
-    """Recent log line showing the OIDC directory failed to build."""
+def reload_identity() -> None:
+    """Load the already saved OIDC directory once Caddy can answer for it."""
+    if not OIDC_PENDING_PATH.is_file():
+        print("Kanidm directory is already loaded.")
+        return
+    if _inspect_container("stalwart") is None:
+        print("Stalwart is not running; skipping identity reload.")
+        return
+    config = load_config()
+    secrets = load_or_create_secrets(config)
+    print("Reloading the Kanidm directory now that Caddy is up…")
+    activate_persisted_oidc(config, secrets, attempts=6, strict=True)
+
+
+def stalwart_directory_error(since: str = "90s") -> str:
+    """Log line since ``since`` showing the OIDC directory failed to build."""
     result = subprocess.run(
-        ["docker", "logs", "--since", "90s", "stalwart"],
+        ["docker", "logs", "--since", since, "stalwart"],
         capture_output=True,
         text=True,
     )
@@ -1617,8 +1664,16 @@ def main() -> None:
         action="store_true",
         help="Unban Docker/Caddy IPs and allowlist 172.16.0.0/12; do not re-apply compose",
     )
+    parser.add_argument(
+        "--reload-identity",
+        action="store_true",
+        help="Reload the saved Kanidm directory after shared Caddy is up",
+    )
     args = parser.parse_args()
     try:
+        if args.reload_identity:
+            reload_identity()
+            return
         apply_configuration(
             skip_runtime=args.skip_runtime,
             skip_pull=args.skip_pull,
