@@ -231,17 +231,17 @@ def render_idp_hosts_overlay(config: dict) -> None:
     that discovery document to install the OIDC directory. From inside the container
     the public address often is not reachable, discovery fails, and the directory
     never becomes the default. Webmail then rejects the token as an internal one.
+
+    Bulwark must keep public DNS for the same hostname. It refuses OAuth metadata
+    whose endpoints resolve to a private address, which is what host-gateway is.
     """
     host = idp_hostname(config)
     stalwart: dict[str, Any] = {}
     if host:
         stalwart["extra_hosts"] = [f"{host}:host-gateway"]
-    services: dict[str, Any] = {"stalwart": stalwart}
-    if host and bulwark_enabled(config):
-        services["bulwark"] = {"extra_hosts": [f"{host}:host-gateway"]}
     NETWORK_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with NETWORK_OVERLAY_PATH.open("w") as handle:
-        yaml.safe_dump({"services": services}, handle, default_flow_style=False)
+        yaml.safe_dump({"services": {"stalwart": stalwart}}, handle, default_flow_style=False)
 
 
 def random_secret(length: int = 32) -> str:

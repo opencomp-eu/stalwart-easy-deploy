@@ -175,7 +175,7 @@ def test_idp_hosts_overlay_pins_issuer_to_host_gateway(tmp_path, monkeypatch):
     render_idp_hosts_overlay(config)
     data = yaml.safe_load(overlay.read_text())
     assert data["services"]["stalwart"]["extra_hosts"] == ["idm.test.example:host-gateway"]
-    assert data["services"]["bulwark"]["extra_hosts"] == ["idm.test.example:host-gateway"]
+    assert "bulwark" not in data["services"]
     assert overlay in compose_file_paths(config)
 
 
