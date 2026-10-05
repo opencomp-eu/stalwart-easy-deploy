@@ -33,6 +33,7 @@ CADDY_TEMPLATE = PROJECT_ROOT / "caddy" / "Caddyfile.template"
 CADDYFILE = PROJECT_ROOT / "caddy" / "Caddyfile"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
+NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 # Docker user-defined bridges (172.16-31) plus other container/private ranges.
 DOCKER_LAN = ipaddress.ip_network("172.16.0.0/12")
@@ -206,7 +207,41 @@ def derive_compose_files(config: dict) -> list[str]:
 
 
 def compose_file_paths(config: dict) -> list[Path]:
-    return [COMPOSE_DIR / name for name in derive_compose_files(config)]
+    paths = [COMPOSE_DIR / name for name in derive_compose_files(config)]
+    if NETWORK_OVERLAY_PATH.is_file():
+        paths.append(NETWORK_OVERLAY_PATH)
+    return paths
+
+
+def idp_hostname(config: dict) -> str:
+    """Hostname of the OIDC issuer, without a scheme or port."""
+    origin = bulwark_idp_origin(config)
+    if not origin:
+        return ""
+    host = origin.split("://", 1)[1]
+    if host.startswith("["):
+        return host
+    return host.split(":", 1)[0]
+
+
+def render_idp_hosts_overlay(config: dict) -> None:
+    """Send the IdP hostname to the host gateway so Stalwart can fetch OIDC metadata.
+
+    The issuer in the Kanidm token is the public https URL. Stalwart must download
+    that discovery document to install the OIDC directory. From inside the container
+    the public address often is not reachable, discovery fails, and the directory
+    never becomes the default. Webmail then rejects the token as an internal one.
+    """
+    host = idp_hostname(config)
+    stalwart: dict[str, Any] = {}
+    if host:
+        stalwart["extra_hosts"] = [f"{host}:host-gateway"]
+    services: dict[str, Any] = {"stalwart": stalwart}
+    if host and bulwark_enabled(config):
+        services["bulwark"] = {"extra_hosts": [f"{host}:host-gateway"]}
+    NETWORK_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with NETWORK_OVERLAY_PATH.open("w") as handle:
+        yaml.safe_dump({"services": services}, handle, default_flow_style=False)
 
 
 def random_secret(length: int = 32) -> str:
@@ -504,6 +539,7 @@ def render_runtime_artifacts(config: dict, secrets: dict) -> None:
     # Bulwark's frame-src.
     apply_engine_identity_sidecar(config)
     ensure_data_dirs(config)
+    render_idp_hosts_overlay(config)
     if proxy_mode(config) == "integrate":
         render_integration_fragment(config)
     else:
@@ -1383,11 +1419,39 @@ def apply_kanidm_directory(config: dict, secrets: dict) -> None:
     elif oidc_id:
         print("  Kanidm OIDC directory is registered but not selected (identity.auth_directory: ldap)")
     # v0.16 keeps Authentication.directoryId in memory until ReloadSettings.
-    # Without this, Bulwark's Kanidm access token is decoded as a Stalwart
-    # token and webmail shows Authentication Failed.
+    # OpenIdDirectory::open also fetches the issuer during that reload. If the
+    # fetch fails, the directory is dropped and bearer tokens hit the internal
+    # decoder ("Failed to decode token").
     if not reload_stalwart_security(config, secrets):
         print("  Directory change did not hot-reload; restarting stalwart…")
-        restart_stalwart_and_wait(config, secrets)
+        if not restart_stalwart_and_wait(config, secrets):
+            raise RuntimeError("Stalwart did not come back after the directory reload")
+        failure = stalwart_directory_error()
+        if failure:
+            raise RuntimeError(
+                "Stalwart could not load the Kanidm OIDC directory, so webmail "
+                f"cannot accept its tokens: {failure}"
+            )
+
+
+def stalwart_directory_error() -> str:
+    """Recent log line showing the OIDC directory failed to build."""
+    result = subprocess.run(
+        ["docker", "logs", "--since", "90s", "stalwart"],
+        capture_output=True,
+        text=True,
+    )
+    text = f"{result.stdout or ''}\n{result.stderr or ''}"
+    needles = (
+        "Discovery fetch failed",
+        "Discovery HTTP error",
+        "Issuer mismatch",
+        "Default directory with ID",
+    )
+    for line in text.splitlines():
+        if any(needle in line for needle in needles):
+            return line.strip()
+    return ""
 
 
 def reconcile_runtime(skip_pull: bool = False) -> None:

@@ -19,7 +19,10 @@ from scripts.apply import (
     bulwark_oauth_env_lines,
     _directory_matches,
     derive_compose_files,
+    compose_file_paths,
     embedded_dns_missing,
+    idp_hostname,
+    render_idp_hosts_overlay,
     ensure_data_dirs,
     repair_stack_networks,
     stack_network_names,
@@ -147,6 +150,33 @@ def test_derive_compose_files_integrate():
         "integrate.yml",
         "integrate-bulwark.yml",
     ]
+
+
+def test_idp_hostname_strips_scheme_and_path():
+    config = _base_config(
+        identity={
+            "provider": "kanidm",
+            "oidc": {"issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui"},
+        }
+    )
+    assert idp_hostname(config) == "idm.test.example"
+    assert idp_hostname(_base_config()) == ""
+
+
+def test_idp_hosts_overlay_pins_issuer_to_host_gateway(tmp_path, monkeypatch):
+    overlay = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr("scripts.apply.NETWORK_OVERLAY_PATH", overlay)
+    config = _base_config(
+        identity={
+            "provider": "kanidm",
+            "oidc": {"issuer_url": "https://idm.test.example/oauth2/openid/stalwart-webui"},
+        }
+    )
+    render_idp_hosts_overlay(config)
+    data = yaml.safe_load(overlay.read_text())
+    assert data["services"]["stalwart"]["extra_hosts"] == ["idm.test.example:host-gateway"]
+    assert data["services"]["bulwark"]["extra_hosts"] == ["idm.test.example:host-gateway"]
+    assert overlay in compose_file_paths(config)
 
 
 def test_stack_networks_include_proxy_in_integrate_mode():
