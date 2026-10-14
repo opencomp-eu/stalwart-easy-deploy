@@ -39,6 +39,11 @@ services:
     volumes:
       - ${STALWART_ETC_DIR}:/etc/stalwart
       - ${STALWART_DATA_DIR}:/var/lib/stalwart
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     networks:
       - stalwart-net
     healthcheck:
