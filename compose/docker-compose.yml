@@ -7,15 +7,15 @@ services:
     # Stalwart downloads OIDC discovery only while building its directories
     # and never retries. After a reboot it can start before Caddy, which
     # leaves webmail SSO broken until the next restart. apply.py writes the
-    # discovery URL to easydeploy-idp-wait once it is known to be reachable;
-    # startup then waits up to 60s for it.
+    # discovery URL to easydeploy-idp-wait before a recovery restart; startup
+    # then waits up to 3 minutes for it, including while Caddy finishes TLS.
     entrypoint:
       - /bin/sh
       - -c
       - |
         url=$$(cat /etc/stalwart/easydeploy-idp-wait 2>/dev/null || true)
         if [ -n "$$url" ]; then
-          end=$$(( $$(date +%s) + 60 ))
+          end=$$(( $$(date +%s) + 180 ))
           until curl -fsS --connect-timeout 2 --max-time 4 -o /dev/null "$$url" 2>/dev/null; do
             if [ "$$(date +%s)" -ge "$$end" ]; then
               echo "easydeploy: $$url is still unreachable; starting without waiting" >&2

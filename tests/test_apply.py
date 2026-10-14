@@ -259,10 +259,28 @@ def test_kit_apply_warns_when_discovery_is_unreachable(tmp_path, monkeypatch, ca
     assert fake.wait_file == []
 
 
-def test_reload_identity_raises_when_discovery_stays_unreachable(tmp_path, monkeypatch):
-    FakeStalwart(monkeypatch, tmp_path, reachable=False)
+def test_reload_identity_restarts_once_when_discovery_is_unreachable(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path, reachable=False)
     with pytest.raises(RuntimeError, match="could not load the Kanidm OIDC directory"):
         ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert fake.calls.count("restart") == 1
+    assert fake.wait_file[0].endswith("/.well-known/openid-configuration")
+
+
+def test_reload_identity_recovers_when_discovery_works_after_restart(tmp_path, monkeypatch):
+    fake = FakeStalwart(monkeypatch, tmp_path, reachable=False)
+
+    def fetch(_url):
+        fake.calls.append("fetch")
+        if fake.calls.count("restart"):
+            fake.reachable = True
+        return (fake.reachable, "") if fake.reachable else (False, "tlsv1 alert internal error")
+
+    fake._fetch = fetch
+    monkeypatch.setattr("scripts.apply.stalwart_fetch", fetch)
+    assert ensure_oidc_directory_live(_oidc_config(), dict(OIDC_SECRETS), wait_seconds=0, strict=True)
+    assert "restart" in fake.calls
+    assert json.loads(fake.state_path.read_text())["directory_id"] == "oidc-1"
 
 
 def test_verified_directory_for_this_container_is_left_alone(tmp_path, monkeypatch):
@@ -325,6 +343,7 @@ def test_compose_waits_for_idp_before_starting_stalwart():
     service = compose["services"]["stalwart"]
     script = service["entrypoint"][2]
     assert "/etc/stalwart/easydeploy-idp-wait" in script
+    assert "date +%s) + 180" in script
     assert 'exec /usr/local/bin/stalwart "$$@"' in script
     assert service["command"] == ["--config", "/etc/stalwart/config.json"]
 

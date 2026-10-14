@@ -1612,6 +1612,15 @@ def ensure_oidc_directory_live(
         return False
 
     ok, detail = wait_for_discovery(url, wait_seconds)
+    if not ok and strict:
+        # Caddy can answer its reload and still reject TLS for a new name
+        # (certificate not ready, or a handshake alert). Stalwart only fetches
+        # this URL while building directories, so restart it with the startup
+        # wait in place and try once more.
+        print("  Identity endpoint is not reachable yet; restarting stalwart so it waits and retries…")
+        set_startup_idp_wait(url)
+        if restart_stalwart_and_wait(config, secrets):
+            ok, detail = wait_for_discovery(url, wait_seconds)
     if not ok:
         return not_live(f"{url} is unreachable from the stalwart container ({detail})")
     set_startup_idp_wait(url)
