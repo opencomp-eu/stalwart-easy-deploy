@@ -1180,7 +1180,7 @@ KANIDM_LDAP_FILTER_LOGIN = (
 )
 KANIDM_LDAP_FILTER_MAILBOX = (
     "(&(|(objectclass=account)(objectclass=person))(|(mail=?)(spn=?)))"
-)
+)  # legacy; build_ldap_directory replaces this with the mail-users filter
 
 
 def managed_is_false(section: dict | None) -> bool:
@@ -1238,6 +1238,8 @@ def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
     base_dn = str(ldap.get("base_dn") or "").strip()
     if not bind_secret or not base_dn:
         return None
+    from scripts.mailboxes import mailbox_filter_for
+
     return {
         "@type": "Ldap",
         "description": KANIDM_DIRECTORY_DESCRIPTION,
@@ -1249,7 +1251,7 @@ def build_ldap_directory(identity: dict, secrets: dict) -> dict | None:
         "allowInvalidCerts": True,
         "useTls": True,
         "filterLogin": str(ldap.get("filter_login") or KANIDM_LDAP_FILTER_LOGIN),
-        "filterMailbox": str(ldap.get("filter_mailbox") or KANIDM_LDAP_FILTER_MAILBOX),
+        "filterMailbox": mailbox_filter_for(base_dn, str(ldap.get("filter_mailbox") or "")),
         "attrEmail": {str(ldap.get("attr_email") or "mail"): True, "emailprimary": True},
         "attrDescription": {str(ldap.get("attr_description") or "displayname"): True},
         "attrMemberOf": {str(ldap.get("attr_member_of") or "memberof"): True},
@@ -1652,6 +1654,51 @@ def ensure_oidc_directory_live(
     return True
 
 
+def apply_mail_fallback(config: dict, secrets: dict) -> None:
+    """Relay unknown same-domain recipients to Microsoft, except mail Microsoft sent us."""
+    from scripts.mail_fallback import MICROSOFT_ROUTE, plan_fallback
+
+    try:
+        domains = _jmap_list(config, secrets, "Domain")
+        routes = _jmap_list(config, secrets, "MtaRoute")
+    except RuntimeError as exc:
+        raise RuntimeError(f"Could not read Stalwart mail routing: {exc}") from exc
+    changes = plan_fallback(config, domains=domains, routes=routes)
+    if not changes:
+        return
+    calls: list = []
+    if "destroy_route_id" in changes:
+        calls.append(["x:MtaRoute/set", {"destroy": [changes["destroy_route_id"]]}, "destroy"])
+    if "create_route" in changes:
+        calls.append(["x:MtaRoute/set", {"create": {MICROSOFT_ROUTE: changes["create_route"]}}, "create"])
+    if "update_route" in changes:
+        update = changes["update_route"]
+        calls.append(["x:MtaRoute/set", {"update": {update["id"]: update["payload"]}}, "update"])
+    if "domain" in changes:
+        domain = changes["domain"]
+        calls.append(
+            ["x:Domain/set", {"update": {domain["id"]: {"allowRelaying": domain["allowRelaying"]}}}, "domain"]
+        )
+    if "route_expression" in changes:
+        calls.append(
+            [
+                "x:MtaOutboundStrategy/set",
+                {"update": {"singleton": {"route": changes["route_expression"]}}},
+                "strategy",
+            ]
+        )
+    for method, payload, call_id in calls:
+        result = _jmap_ok(_jmap(config, secrets, [[method, payload, call_id]]), call_id)
+        for key in ("notCreated", "notUpdated", "notDestroyed"):
+            if result.get(key):
+                raise RuntimeError(f"Could not apply Microsoft fallback ({key}): {result[key]}")
+    if changes.get("domain", {}).get("allowRelaying"):
+        host = str((changes.get("create_route") or changes.get("update_route", {}).get("payload") or {}).get("address") or "")
+        print(f"  Microsoft fallback: unknown recipients relay to {host}, except mail from Microsoft")
+    elif "destroy_route_id" in changes or changes.get("domain", {}).get("allowRelaying") is False:
+        print("  Microsoft fallback is off")
+
+
 def reload_identity() -> None:
     """Load the saved Kanidm directory once Caddy serves the identity hostname."""
     if not SECRETS_PATH.is_file() or _inspect_container("stalwart") is None:
@@ -1694,6 +1741,7 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
         restart_stalwart_and_wait(config, secrets)
     protect_caddy_from_autoban(config, secrets)
     apply_kanidm_directory(config, secrets)
+    apply_mail_fallback(config, secrets)
     from scripts.groupware import sync_groupware_locked
 
     sync_groupware_locked(config, secrets)
@@ -1727,7 +1775,8 @@ def print_summary(config: dict, secrets: dict) -> None:
             print("Identity:        Kanidm OIDC (Bulwark / portal SSO)")
             print("                 Webmail signs in through Kanidm (passkey or session).")
             print("                 IMAP/SMTP: create a Stalwart app password in the admin UI.")
-            print("                 New mailboxes appear after the first successful SSO.")
+            print("                 Mailboxes are created for people in mail-users, before they sign in.")
+            print("                 Webmail sign-in is limited to that group.")
     print("Calendar:        Calendar")
     print("Address book:    Address Book")
     from scripts.groupware import contacts_sync_enabled

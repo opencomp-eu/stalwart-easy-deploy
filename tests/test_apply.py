@@ -815,6 +815,7 @@ def test_build_ldap_directory_payload():
     assert "objectclass=account" in payload["filterLogin"]
     assert "spn=?" in payload["filterLogin"]
     assert "mail=?" in payload["filterMailbox"]
+    assert "memberof=spn=mail-users@idm.test.example,dc=idm,dc=test,dc=example" in payload["filterMailbox"]
 
 
 def test_build_oidc_directory_payload():

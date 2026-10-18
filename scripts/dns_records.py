@@ -14,6 +14,11 @@ from pathlib import Path
 
 import yaml
 
+if __package__:
+    from scripts.mail_fallback import spf_value
+else:
+    from mail_fallback import spf_value
+
 
 def dns_records(
     config: dict,
@@ -46,7 +51,17 @@ def dns_records(
             "purpose": "spf",
             "type": "TXT",
             "name": domain,
-            "value": "v=spf1 mx -all",
+            "value": spf_value(config),
+            **(
+                {
+                    "comment": (
+                        "While the MX still points at Microsoft, add this server's ip4: as well. "
+                        "mx does not authorise the workspace until the MX itself points here."
+                    )
+                }
+                if spf_value(config) != "v=spf1 mx -all"
+                else {}
+            ),
         },
         {
             "purpose": "dmarc",

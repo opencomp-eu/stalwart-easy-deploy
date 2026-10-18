@@ -29,6 +29,17 @@ ports:
   imaps: 993
   sieve: 4190
 
+# Share the company domain with Microsoft 365 while people move one at a time.
+# host is the tenant MX, for example contoso-com.mail.protection.outlook.com.
+# Unknown recipients are relayed there, except mail that Microsoft itself delivered
+# (that would loop). Set this only after the Microsoft connectors in
+# docs/microsoft-fallback.md in this kit, and the OpenComp coexistence runbook.
+# mail:
+#   fallback:
+#     enabled: true
+#     host: contoso-com.mail.protection.outlook.com
+#     port: 25
+
 # identity.provider: kanidm — written by easydeploy-engine.
 # Bulwark signs in through Kanidm OIDC. IMAP/SMTP use a Stalwart app password.
 # Set identity.auth_directory: ldap to bind IMAP with the Kanidm password instead.

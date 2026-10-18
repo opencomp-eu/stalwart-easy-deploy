@@ -45,6 +45,7 @@ class Person:
     name: str
     display_name: str
     emails: tuple[str, ...]
+    groups: tuple[str, ...] = ()
 
     @property
     def uid(self) -> str:
@@ -212,8 +213,11 @@ def parse_kanidm_people(payload: Any) -> list[Person]:
         if not uuid or not emails or uuid in seen:
             continue
         display = next(iter(_attr_values(entry, "displayname")), "") or name or emails[0]
+        groups = tuple(dict.fromkeys(value.casefold() for value in _attr_values(entry, "memberof")))
         seen.add(uuid)
-        people.append(Person(uuid=uuid, name=name, display_name=display, emails=emails))
+        people.append(
+            Person(uuid=uuid, name=name, display_name=display, emails=emails, groups=groups)
+        )
     return people
 
 
@@ -659,14 +663,20 @@ def sync_groupware(config: dict, secrets: dict) -> str:
         return _jmap(config, secrets, calls, using=using or SETTINGS_USING, timeout=30)
 
     apply_default_names(admin_jmap)
-    accounts = list_mailboxes(admin_jmap)
     people: list[Person] | None = None
     people_error: Exception | None = None
-    if contacts_sync_enabled(config):
+    kanidm = str((config.get("identity") or {}).get("provider") or "").strip().lower() == "kanidm"
+    if kanidm:
         try:
             people = fetch_kanidm_people()
         except (RuntimeError, ValueError) as exc:
             people_error = exc
+    if people is not None:
+        from scripts.mailboxes import provision_mail_users
+
+        provision_mail_users(config, secrets, people, admin_jmap)
+    contact_people = people if contacts_sync_enabled(config) else None
+    accounts = list_mailboxes(admin_jmap)
 
     totals = MailboxSync()
     mailboxes = 0
@@ -691,7 +701,7 @@ def sync_groupware(config: dict, secrets: dict) -> str:
                 account_id=account_id,
                 account_name=account_name,
                 domain=domain,
-                people=people,
+                people=contact_people,
             )
         except RuntimeError as exc:
             failures.append(f"{account_name}: {exc}")
@@ -713,10 +723,10 @@ def sync_groupware(config: dict, secrets: dict) -> str:
             f"{'s' if totals.address_book_renamed != 1 else ''} and "
             f"{totals.calendar_renamed} calendar{'s' if totals.calendar_renamed != 1 else ''}"
         )
-    if people is not None:
+    if contact_people is not None:
         parts.append(
             f"contacts +{totals.created} ~{totals.updated} -{totals.removed} "
-            f"from {len(people)} Kanidm people"
+            f"from {len(contact_people)} Kanidm people"
         )
     message = "Groupware: " + "; ".join(parts)
     if failures:

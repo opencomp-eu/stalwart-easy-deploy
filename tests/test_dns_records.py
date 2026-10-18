@@ -27,6 +27,14 @@ def test_dns_records_leave_dkim_pending_until_a_key_exists():
         "value": "mail.example.com",
     }
     assert by_purpose["spf"]["value"] == "v=spf1 mx -all"
+    shared = dns_records(
+        {
+            "stalwart": {"hostname": "mail.example.com", "domain": "example.com"},
+            "mail": {"fallback": {"host": "example-com.mail.protection.outlook.com"}},
+        }
+    )
+    shared_spf = next(record for record in shared["records"] if record["purpose"] == "spf")
+    assert shared_spf["value"] == "v=spf1 mx include:spf.protection.outlook.com -all"
     assert by_purpose["dmarc"]["name"] == "_dmarc.example.com"
     assert by_purpose["dkim"]["status"] == "pending"
     assert by_purpose["dkim"]["value"] is None
