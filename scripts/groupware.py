@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import grp
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -758,21 +760,50 @@ def sync_exec_start(project_root: Path) -> str:
     return f"{uv} run --project {project_root} python -m scripts.groupware"
 
 
+def service_owner(project_root: Path) -> tuple[str, str]:
+    """User/group that owns the kit checkout — the timer must write state as them."""
+    st = project_root.resolve().stat()
+    try:
+        user = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        user = str(st.st_uid)
+    try:
+        group = grp.getgrgid(st.st_gid).gr_name
+    except KeyError:
+        group = str(st.st_gid)
+    return user, group
+
+
 def render_sync_service(project_root: Path) -> str:
-    return "\n".join(
+    # Without User=, systemd runs the oneshot as root and leaves
+    # provisioned-mailboxes.json (and the sync lock) root-owned, so a later
+    # update.sh as the deploy user fails with PermissionError.
+    user, group = service_owner(project_root)
+    lines = [
+        "[Unit]",
+        "Description=Sync Kanidm people into Stalwart address books",
+        "Wants=network-online.target docker.service",
+        "After=network-online.target docker.service",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        f"User={user}",
+        f"Group={group}",
+    ]
+    try:
+        grp.getgrnam("docker")
+    except KeyError:
+        pass
+    else:
+        lines.append("SupplementaryGroups=docker")
+    lines.extend(
         [
-            "[Unit]",
-            "Description=Sync Kanidm people into Stalwart address books",
-            "Wants=network-online.target docker.service",
-            "After=network-online.target docker.service",
-            "",
-            "[Service]",
-            "Type=oneshot",
             f"WorkingDirectory={project_root}",
             f"ExecStart={sync_exec_start(project_root)}",
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def render_sync_timer(unit_name: str) -> str:

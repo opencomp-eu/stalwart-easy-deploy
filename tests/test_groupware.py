@@ -20,7 +20,9 @@ from scripts.groupware import (
     parse_kanidm_people,
     plan_contact_changes,
     reconcile_contacts_timer,
+    render_sync_service,
     render_sync_timer,
+    service_owner,
     sync_mailbox,
 )
 
@@ -305,6 +307,11 @@ def test_contact_timer_installs_and_removes(tmp_path, monkeypatch):
     timer = (tmp_path / "stalwart-easy-deploy-contacts.timer").read_text()
     assert "OnCalendar=*:0/5" in timer
     assert render_sync_timer("stalwart-easy-deploy-contacts") == timer
+    service = (tmp_path / "stalwart-easy-deploy-contacts.service").read_text()
+    user, group = service_owner(tmp_path)
+    assert f"User={user}" in service
+    assert f"Group={group}" in service
+    assert service == render_sync_service(tmp_path)
     assert ["systemctl", "enable", "--now", "stalwart-easy-deploy-contacts.timer"] in runs
 
     message = reconcile_contacts_timer(
@@ -316,3 +323,12 @@ def test_contact_timer_installs_and_removes(tmp_path, monkeypatch):
     assert message == "Kanidm contact sync timer removed."
     assert not (tmp_path / "stalwart-easy-deploy-contacts.timer").exists()
     assert os.environ["EASYDEPLOY_ASSUME_SYSTEMD"] == "1"
+
+
+def test_render_sync_service_runs_as_checkout_owner(tmp_path, monkeypatch):
+    user, group = service_owner(tmp_path)
+    monkeypatch.setattr("scripts.groupware.grp.getgrnam", lambda name: type("G", (), {"gr_name": name})())
+    text = render_sync_service(tmp_path)
+    assert f"User={user}" in text
+    assert f"Group={group}" in text
+    assert "SupplementaryGroups=docker" in text
