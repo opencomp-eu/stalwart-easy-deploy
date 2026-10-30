@@ -80,12 +80,17 @@ timer and are reconciled by `apply.sh`.
 
 ## TLS for IMAP/SMTP
 
-Caddy owns port 443, so Stalwart cannot complete HTTP-01 ACME for mail ports. After first boot, either:
+Caddy owns ports 80 and 443, so Stalwart cannot complete an ACME challenge of its own. `apply.sh` turns Stalwart's ACME off and copies Caddy's certificate for the mail hostname into Stalwart. That certificate is what IMAPS, SMTPS and STARTTLS present, including to clients that send no server name.
 
-- Configure **DNS-01 ACME** in the Stalwart WebUI for `mail.example.com`, or
-- Copy the Caddy-issued certificate into Stalwart (see [Stalwart’s Caddy guide](https://stalw.art/docs/server/reverse-proxy/caddy/)).
+Until Caddy has issued the certificate (DNS must already point here), those ports still present Stalwart's self-signed certificate. `apply.sh` retries for about 30 seconds. After that, an hourly systemd timer copies the certificate again, including when Caddy renews it. Run `bash apply.sh --sync-mail-tls` to copy it immediately.
 
-Until then, IMAPS/SMTPS present Stalwart’s fallback certificate.
+Check the certificate clients actually see:
+
+```bash
+echo | openssl s_client -connect mail.example.com:993 -servername mail.example.com 2>/dev/null | openssl x509 -noout -issuer -subject -dates
+```
+
+The issuer should be a public certificate authority. A subject of `CN = rcgen self signed cert` means the fallback is still in place.
 
 ## Troubleshooting
 

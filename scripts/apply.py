@@ -1743,8 +1743,10 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
     apply_kanidm_directory(config, secrets)
     apply_mail_fallback(config, secrets)
     from scripts.groupware import sync_groupware_locked
+    from scripts.mail_tls import apply_mail_certificate
 
     sync_groupware_locked(config, secrets)
+    apply_mail_certificate(config, secrets, wait_seconds=30)
 
 
 def print_summary(config: dict, secrets: dict) -> None:
@@ -1802,6 +1804,8 @@ def print_summary(config: dict, secrets: dict) -> None:
     print("     In integrate mode also run engine apply.sh --skip-kits.")
     print("  4. Publish MX / SPF / DKIM / DMARC from the Stalwart WebUI DNS zone.")
     print("  5. Mail ports 25/465/587/993/4190 are bound on the host, not via Caddy.")
+    print("     apply.sh copies Caddy's certificate onto those ports, and an")
+    print("     hourly timer repeats the copy after Caddy renews it.")
     print()
 
 
@@ -1831,8 +1835,10 @@ def apply_configuration(
         print_summary(config, secrets)
     reconcile_backup_schedule(config)
     from scripts.groupware import reconcile_contacts_schedule
+    from scripts.mail_tls import reconcile_mail_tls_schedule
 
     reconcile_contacts_schedule(config)
+    reconcile_mail_tls_schedule()
 
 
 def reconcile_backup_schedule(config: dict) -> None:
@@ -1878,10 +1884,21 @@ def main() -> None:
         action="store_true",
         help="Reload the saved Kanidm directory after shared Caddy is up",
     )
+    parser.add_argument(
+        "--sync-mail-tls",
+        action="store_true",
+        help="Copy Caddy's certificate into Stalwart and reload mail TLS",
+    )
     args = parser.parse_args()
     try:
         if args.reload_identity:
             reload_identity()
+            return
+        if args.sync_mail_tls:
+            config = load_config()
+            from scripts.mail_tls import apply_mail_certificate
+
+            apply_mail_certificate(config, load_or_create_secrets(config))
             return
         apply_configuration(
             skip_runtime=args.skip_runtime,
