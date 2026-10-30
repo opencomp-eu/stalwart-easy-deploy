@@ -283,6 +283,29 @@ def test_reload_identity_recovers_when_discovery_works_after_restart(tmp_path, m
     assert json.loads(fake.state_path.read_text())["directory_id"] == "oidc-1"
 
 
+def test_reload_identity_installs_mail_certificate_before_directory(tmp_path, monkeypatch):
+    import scripts.apply as kit_apply
+    import scripts.mail_tls as mail_tls
+
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text("RECOVERY_ADMIN_PASSWORD: x\n")
+    order = []
+    monkeypatch.setattr(kit_apply, "SECRETS_PATH", secrets_path)
+    monkeypatch.setattr(kit_apply, "_inspect_container", lambda name: {"Name": name})
+    monkeypatch.setattr(kit_apply, "load_config", lambda: {"stalwart": {"hostname": "mail.acme.test"}})
+    monkeypatch.setattr(kit_apply, "load_or_create_secrets", lambda config: {})
+    monkeypatch.setattr(
+        mail_tls, "apply_mail_certificate",
+        lambda config, secrets, wait_seconds=0: order.append(("tls", wait_seconds)),
+    )
+    monkeypatch.setattr(
+        kit_apply, "ensure_oidc_directory_live",
+        lambda config, secrets, wait_seconds=0, strict=False: order.append(("oidc", strict)),
+    )
+    kit_apply.reload_identity()
+    assert order == [("tls", 120), ("oidc", True)]
+
+
 def test_verified_directory_for_this_container_is_left_alone(tmp_path, monkeypatch):
     fake = FakeStalwart(monkeypatch, tmp_path)
     fake.record()

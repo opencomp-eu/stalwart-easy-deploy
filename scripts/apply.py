@@ -1700,11 +1700,23 @@ def apply_mail_fallback(config: dict, secrets: dict) -> None:
 
 
 def reload_identity() -> None:
-    """Load the saved Kanidm directory once Caddy serves the identity hostname."""
+    """Finish what needs the shared Caddy: the mail certificate and the Kanidm directory.
+
+    easydeploy-engine runs this after it starts Caddy with this kit's site
+    block. On a fresh deploy that is the first moment Caddy can hold a
+    certificate for the mail hostname, so copy it now rather than leaving
+    IMAPS and SMTPS without one until the hourly sync.
+    """
     if not SECRETS_PATH.is_file() or _inspect_container("stalwart") is None:
         return
     config = load_config()
     secrets = load_or_create_secrets(config)
+    from scripts.mail_tls import apply_mail_certificate
+
+    try:
+        apply_mail_certificate(config, secrets, wait_seconds=120)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Mail TLS: {exc}", file=sys.stderr)
     ensure_oidc_directory_live(config, secrets, wait_seconds=60, strict=True)
 
 
