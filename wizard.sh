@@ -71,9 +71,15 @@ gather_config() {
 
 	echo
 	echo -e "${BOLD}  Webmail (Bulwark)${RESET}"
-	ask_yn bulwark_on "Install Bulwark webmail?" "y"
 	bulwark_domain="webmail.${domain}"
 	bulwark_data_dir="$(default_data_dir bulwark)"
+	# The engine sets this when another kit is the webmail (Nextcloud Mail).
+	if [[ -n "${EASYDEPLOY_WEBMAIL_PROVIDER:-}" ]]; then
+		bulwark_on="n"
+		info "Webmail is ${EASYDEPLOY_WEBMAIL_PROVIDER}; Bulwark is not installed."
+	else
+		ask_yn bulwark_on "Install Bulwark webmail?" "y"
+	fi
 	if [[ "$bulwark_on" == "y" ]]; then
 		ask bulwark_domain "Webmail domain" "$bulwark_domain"
 		ask bulwark_data_dir "Bulwark data directory" "$bulwark_data_dir"
