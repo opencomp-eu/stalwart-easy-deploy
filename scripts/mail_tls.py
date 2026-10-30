@@ -342,10 +342,36 @@ def execute_mail_tls_plan(
     plan: dict[str, Any],
     call: Callable[[list], dict],
     ok: Callable[[dict, str], dict],
+    restart: Callable[[], bool] | None = None,
 ) -> str:
-    """Apply a plan. Returns the certificate id now selected as the default."""
+    """Apply a plan. Returns the certificate id now selected as the default.
+
+    ReloadSettings validates every stored object, so one unrelated invalid
+    object (for example a spam rule newer than the server) refuses it. A
+    restart loads the stored default certificate regardless, so when
+    ``restart`` is given it replaces a refused reload.
+    """
     if not plan:
         return ""
+    restarted = False
+
+    def run_action(action: str, call_id: str) -> None:
+        nonlocal restarted
+        if restarted:
+            return
+        result = ok(
+            call([["x:Action/set", {"create": {call_id: {"@type": action}}}, call_id]]),
+            call_id,
+        )
+        if not result.get("notCreated"):
+            return
+        if restart is not None:
+            print(f"Mail TLS: Stalwart refused {action}; restarting it to load the certificate…")
+            if restart():
+                restarted = True
+                return
+        raise RuntimeError(f"Could not run {action}: {result['notCreated']}")
+
     new_id = ""
     if plan.get("create"):
         created = ok(
@@ -373,26 +399,10 @@ def execute_mail_tls_plan(
             raise RuntimeError(
                 f"Could not select the mail certificate as the default: {updated['notUpdated']}"
             )
-    reloads = []
     if plan.get("reload_settings"):
-        reloads.append(("ReloadSettings", "settings"))
+        run_action("ReloadSettings", "settings")
     if plan.get("reload_certificates"):
-        reloads.append(("ReloadTlsCertificates", "certs"))
-    for action, call_id in reloads:
-        result = ok(
-            call(
-                [
-                    [
-                        "x:Action/set",
-                        {"create": {call_id: {"@type": action}}},
-                        call_id,
-                    ]
-                ]
-            ),
-            call_id,
-        )
-        if result.get("notCreated"):
-            raise RuntimeError(f"Could not run {action}: {result['notCreated']}")
+        run_action("ReloadTlsCertificates", "certs")
     destroy = [item for item in plan.get("destroy_ids") or [] if item and item != new_id]
     if destroy:
         destroyed = ok(call([["x:Certificate/set", {"destroy": destroy}, "d"]]), "d")
@@ -401,20 +411,7 @@ def execute_mail_tls_plan(
                 f"Could not remove the previous mail certificate: {destroyed['notDestroyed']}"
             )
         if plan.get("reload_certificates"):
-            result = ok(
-                call(
-                    [
-                        [
-                            "x:Action/set",
-                            {"create": {"certs-after": {"@type": "ReloadTlsCertificates"}}},
-                            "certs-after",
-                        ]
-                    ]
-                ),
-                "certs-after",
-            )
-            if result.get("notCreated"):
-                raise RuntimeError(f"Could not run ReloadTlsCertificates: {result['notCreated']}")
+            run_action("ReloadTlsCertificates", "certs-after")
     return default_id
 
 
@@ -505,7 +502,11 @@ def apply_mail_certificate(
     def call(method_calls: list) -> dict:
         return _jmap(config, secrets, method_calls)
 
-    certificate_id = execute_mail_tls_plan(plan, call, _jmap_ok)
+    from scripts.apply import restart_stalwart_and_wait
+
+    certificate_id = execute_mail_tls_plan(
+        plan, call, _jmap_ok, restart=lambda: restart_stalwart_and_wait(config, secrets)
+    )
     if not certificate_id:
         certificate_id = str(plan.get("set_default") or remembered)
     save_state(hostname, certificate_id, material_digest(*material))

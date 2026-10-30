@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scripts.mail_tls import (
     caddy_container_name,
     certificate_payload,
@@ -164,6 +166,41 @@ def test_execute_reloads_after_the_old_certificate_is_gone():
     assert calls[3][1]["create"]["certs"]["@type"] == "ReloadTlsCertificates"
     assert calls[4][1]["destroy"] == ["cert-1"]
     assert calls[5][1]["create"]["certs-after"]["@type"] == "ReloadTlsCertificates"
+
+
+def test_execute_restarts_when_settings_reload_is_refused():
+    calls, restarts = [], []
+    refused = {"type": "validationFailed", "objectId": {"object": "SpamDnsblServer"}}
+
+    def call(method_calls):
+        calls.extend(method_calls)
+        method, payload, call_id = method_calls[0]
+        if method == "x:Certificate/set" and "create" in payload:
+            return {"methodResponses": [[method, {"created": {"caddy-mail": {"id": "cert-2"}}}, call_id]]}
+        if method == "x:Certificate/set" and "destroy" in payload:
+            return {"methodResponses": [[method, {"destroyed": payload["destroy"]}, call_id]]}
+        if method == "x:SystemSettings/set":
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, call_id]]}
+        return {"methodResponses": [[method, {"notCreated": {call_id: refused}}, call_id]]}
+
+    from scripts.apply import _jmap_ok
+
+    plan = plan_mail_tls(
+        HOST,
+        certificates=[_cert("cert-1")],
+        default_id="cert-1",
+        remembered_id="cert-1",
+        material_changed=True,
+        have_material=True,
+    )
+    chosen = execute_mail_tls_plan(plan, call, _jmap_ok, restart=lambda: restarts.append(1) or True)
+    assert chosen == "cert-2"
+    assert restarts == [1]
+    actions = [item[1]["create"] for item in calls if item[0] == "x:Action/set"]
+    assert actions == [{"settings": {"@type": "ReloadSettings"}}]
+
+    with pytest.raises(RuntimeError, match="Could not run ReloadSettings"):
+        execute_mail_tls_plan(plan, call, _jmap_ok)
 
 
 def test_caddy_lookup_passes_the_hostname_only_as_a_filter():
