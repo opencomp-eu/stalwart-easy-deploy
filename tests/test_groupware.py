@@ -17,6 +17,7 @@ from scripts.groupware import (
     desired_collection_name,
     impersonation_username,
     mailbox_login,
+    parse_args,
     parse_kanidm_people,
     plan_contact_changes,
     reconcile_contacts_timer,
@@ -158,6 +159,11 @@ def test_plan_adds_colleagues_updates_names_and_drops_removed_people():
     assert destroy == ["gone"]
     untouched = [card for card in existing if card["id"] == "keep"]
     assert untouched[0]["uid"] == "personal"
+
+
+def test_groupware_waits_only_when_asked():
+    assert parse_args([]).wait is False
+    assert parse_args(["--wait"]).wait is True
 
 
 def test_impersonation_username_puts_the_mailbox_first():

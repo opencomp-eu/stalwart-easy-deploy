@@ -951,10 +951,19 @@ def reconcile_contacts_schedule(config: dict) -> None:
     print(f"Contact sync: {message}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync Kanidm people into Stalwart address books")
-    parser.parse_args(argv)
-    with sync_lock(blocking=False) as acquired:
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait if another sync is running, then sync. Used when a person was just created.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    with sync_lock(blocking=args.wait) as acquired:
         if not acquired:
             print("Contact sync already running.")
             return 0
