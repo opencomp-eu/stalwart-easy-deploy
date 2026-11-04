@@ -30,6 +30,10 @@ from scripts.apply import (
     stack_network_names,
     load_or_create_secrets,
     protect_caddy_from_autoban,
+    dnsbl_ids_to_disable,
+    reload_stalwart_security,
+    security_ban_policy,
+    SecurityReload,
     public_url,
     render_caddyfile,
     render_template,
@@ -701,7 +705,8 @@ def test_protect_caddy_unbans_docker_lan_and_enables_forwarded(monkeypatch):
     http_update = next(c[0][1] for c in calls if c[0][0] == "x:Http/set")
     assert http_update["update"]["singleton"]["useXForwarded"] is True
     security = next(c[0][1] for c in calls if c[0][0] == "x:Security/set")
-    assert security["update"]["singleton"]["scanBanPaths"] == {}
+    assert security["update"]["singleton"] == security_ban_policy()
+    assert security["update"]["singleton"]["authBanPeriod"] == 3_600_000
     actions = [
         next(iter(c[0][1]["create"].values()))["@type"]
         for c in calls
@@ -782,6 +787,210 @@ def test_protect_caddy_completes_bootstrap(tmp_path, monkeypatch):
     saved = yaml.safe_load(secrets_path.read_text())
     assert saved["STALWART_ADMIN_PASSWORD"] == "genpw"
     assert saved["STALWART_ADMIN_USER"] == "admin@test.example"
+
+
+def test_unlock_proxy_clears_public_blocked_ips(monkeypatch):
+    calls: list[list] = []
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        raise AssertionError(cmd)
+
+    def fake_jmap(_config, _secrets, method_calls):
+        calls.append(method_calls)
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        if method == "x:BlockedIp/query":
+            return {"methodResponses": [[method, {"ids": ["ban1", "ban2"]}, cid]]}
+        if method == "x:BlockedIp/get":
+            return {
+                "methodResponses": [
+                    [
+                        method,
+                        {
+                            "list": [
+                                {"id": "ban1", "address": "172.19.0.5"},
+                                {"id": "ban2", "address": "93.34.238.40"},
+                            ]
+                        },
+                        cid,
+                    ]
+                ]
+            }
+        if method == "x:BlockedIp/set":
+            return {"methodResponses": [[method, {"destroyed": method_calls[0][1]["destroy"]}, cid]]}
+        if method == "x:AllowedIp/query":
+            return {"methodResponses": [[method, {"ids": []}, cid]]}
+        if method == "x:AllowedIp/get":
+            return {"methodResponses": [[method, {"list": []}, cid]]}
+        if method == "x:AllowedIp/set":
+            return {"methodResponses": [[method, {"created": method_calls[0][1]["create"]}, cid]]}
+        if method in {"x:Http/set", "x:Security/set"}:
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        if method == "x:Action/set":
+            key = next(iter(method_calls[0][1]["create"]))
+            return {
+                "methodResponses": [
+                    [method, {"created": {key: {"id": f"action-{key}"}}}, cid]
+                ]
+            }
+        raise AssertionError(method)
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+
+    protect_caddy_from_autoban(
+        _base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"}, clear_all_blocks=True
+    )
+    destroy = next(c[0][1] for c in calls if c[0][0] == "x:BlockedIp/set")
+    assert destroy["destroy"] == ["ban1", "ban2"]
+
+
+def test_reload_still_flushes_blocklist_when_settings_fail(monkeypatch):
+    actions: list[str] = []
+    restarts: list[str] = []
+
+    def fake_jmap(_config, _secrets, method_calls):
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        action = next(iter(method_calls[0][1]["create"].values()))["@type"]
+        actions.append(action)
+        if action == "ReloadSettings":
+            return {
+                "methodResponses": [
+                    [
+                        method,
+                        {
+                            "notCreated": {
+                                "reload-ReloadSettings": {
+                                    "type": "validationFailed",
+                                    "description": "Invalid variable or constant 'bit_and'",
+                                    "objectId": {"object": "Queue"},
+                                }
+                            }
+                        },
+                        cid,
+                    ]
+                ]
+            }
+        return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
+
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    result = reload_stalwart_security(_base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"})
+    assert result == SecurityReload(settings_ok=False, blocked_ok=True)
+    assert actions == ["ReloadSettings", "ReloadBlockedIps"]
+
+    monkeypatch.setattr(
+        "scripts.apply.restart_stalwart_and_wait", lambda *_a, **_k: restarts.append("restart") or True
+    )
+    calls = {"blocked": 0}
+
+    def count_blocked(config, secrets, *, warn=True):
+        del config, secrets, warn
+        calls["blocked"] += 1
+        return True
+
+    monkeypatch.setattr("scripts.apply.reload_blocked_ips", count_blocked)
+    monkeypatch.setattr(
+        "scripts.apply.reload_stalwart_security",
+        lambda *_a, **_k: SecurityReload(settings_ok=False, blocked_ok=False),
+    )
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        raise AssertionError(cmd)
+
+    def empty_jmap(_config, _secrets, method_calls):
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        if method.endswith("/query"):
+            return {"methodResponses": [[method, {"ids": []}, cid]]}
+        if method.endswith("/get"):
+            return {"methodResponses": [[method, {"list": []}, cid]]}
+        if method.endswith("/set"):
+            return {"methodResponses": [[method, {"updated": {"singleton": None}}, cid]]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    monkeypatch.setattr("scripts.apply._jmap", empty_jmap)
+    protect_caddy_from_autoban(_base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"})
+    assert restarts == ["restart"]
+    assert calls["blocked"] == 1
+
+
+def test_dnsbl_repair_disables_bit_and_then_reloads(monkeypatch):
+    calls: list[str] = []
+
+    def fake_list(_config, _secrets, type_name):
+        assert type_name == "SpamDnsblServer"
+        return [
+            {
+                "id": "bl1",
+                "name": "STWT_SPAMHAUS",
+                "enable": True,
+                "tag": "if(bit_and(octets[3], 4) != 0, 'listed', false)",
+            },
+            {"id": "bl2", "name": "STWT_OK", "enable": True, "tag": "octets[3] == 2"},
+        ]
+
+    def fake_jmap(_config, _secrets, method_calls):
+        method = method_calls[0][0]
+        cid = method_calls[0][2]
+        calls.append(method)
+        if method == "x:SpamDnsblServer/set":
+            assert method_calls[0][1]["update"] == {"bl1": {"enable": False}}
+            return {"methodResponses": [[method, {"updated": {"bl1": None}}, cid]]}
+        action = next(iter(method_calls[0][1]["create"].values()))["@type"]
+        calls.append(action)
+        if action == "ReloadSettings" and calls.count("ReloadSettings") == 1:
+            return {
+                "methodResponses": [
+                    [
+                        method,
+                        {
+                            "notCreated": {
+                                "reload-ReloadSettings": {
+                                    "type": "validationFailed",
+                                    "description": (
+                                        "Error parsing 'if' expression in condition #3: "
+                                        "Invalid variable or constant 'bit_and'"
+                                    ),
+                                    "objectId": {"object": "SpamDnsblServer"},
+                                }
+                            }
+                        },
+                        cid,
+                    ]
+                ]
+            }
+        return {"methodResponses": [[method, {"created": {"reload": {"id": "1"}}}, cid]]}
+
+    monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    result = reload_stalwart_security(_base_config(), {"RECOVERY_ADMIN_PASSWORD": "pw"})
+    assert result.settings_ok is True
+    assert result.blocked_ok is True
+    assert calls.count("ReloadSettings") == 2
+
+
+def test_dnsbl_ids_follow_named_id_or_every_server():
+    servers = [
+        {"id": "a", "enable": True, "tag": "bit_and(octets[3], 4)"},
+        {"id": "b", "enable": True, "tag": "true"},
+        {"id": "c", "enable": False, "tag": "bit_and(octets[3], 1)"},
+    ]
+    assert dnsbl_ids_to_disable(servers, "object SpamDnsblServer") == ["a"]
+    named = "{'object': 'SpamDnsblServer', 'id': 'b'}"
+    assert dnsbl_ids_to_disable(servers, named) == ["b"]
+    assert dnsbl_ids_to_disable(servers, "SpamDnsblServer validationFailed") == ["a"]
+    plain = [{"id": "b", "enable": True, "tag": "true"}]
+    assert dnsbl_ids_to_disable(plain, "SpamDnsblServer validationFailed") == ["b"]
 
 
 def test_apply_engine_identity_sidecar_fills_kanidm(tmp_path):

@@ -7,11 +7,13 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,10 @@ PRIVATE_UNBAN_NETWORKS = (
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
 )
+# Automatic bans are permanent unless a period is set. One hour is long enough
+# to slow a scanner and short enough that a false positive (shared NAT, a
+# password typo) does not lock the operator out until someone SSHes in.
+BAN_PERIOD_MS = 3_600_000
 # Stalwart scan-bans the reverse-proxy IP on the first matching exploit URL.
 # Drop those paths in Caddy so internet scanners cannot lock Caddy out.
 CADDY_SCAN_BAN_PATHS = (
@@ -985,54 +991,208 @@ def restart_stalwart_and_wait(config: dict, secrets: dict, *, attempts: int = 60
     return False
 
 
-def reload_stalwart_security(config: dict, secrets: dict, *, warn: bool = True) -> bool:
-    """Reload settings and IP caches after API writes.
+@dataclass(frozen=True)
+class SecurityReload:
+    """Outcome of refreshing Stalwart's in-memory settings and blocklist.
 
-    Stalwart v0.16 persists registry changes without necessarily refreshing
-    the listener's in-memory settings and blocklist. ReloadSettings activates
-    the scan-ban/useXForwarded changes; ReloadBlockedIps clears stale bans and
-    activates AllowedIp changes.
+    Truthy only when both reloads succeeded, so existing callers that restart
+    on ``if not reload_stalwart_security(...)`` still do.
     """
-    for action, label in (
-        ("ReloadSettings", "settings"),
-        ("ReloadBlockedIps", "blocked/allowed IP caches"),
-    ):
-        try:
-            result = _jmap_ok(
-                _jmap(
-                    config,
-                    secrets,
-                    [
-                        [
-                            "x:Action/set",
-                            {
-                                "create": {
-                                    f"reload-{action}": {
-                                        "@type": action,
-                                    }
-                                }
-                            },
-                            "r",
-                        ]
-                    ],
-                ),
-                "r",
-            )
-            not_created = result.get("notCreated") or {}
-            if not_created:
-                raise RuntimeError(str(not_created))
-            print(f"  reloaded {label}")
-        except RuntimeError as exc:
-            if warn:
-                print(f"Warning: could not reload {label}: {exc}", file=sys.stderr)
-            else:
-                print(f"  could not reload {label}: {str(exc)[:300]}")
-            return False
+
+    settings_ok: bool
+    blocked_ok: bool
+
+    def __bool__(self) -> bool:
+        return self.settings_ok and self.blocked_ok
+
+
+def security_ban_policy() -> dict[str, Any]:
+    """Scan-path bans off, and every automatic ban expires after one hour."""
+    return {
+        "scanBanPaths": {},
+        "scanBanRate": {"count": 1000000, "period": 86400000},
+        "authBanPeriod": BAN_PERIOD_MS,
+        "abuseBanPeriod": BAN_PERIOD_MS,
+        "loiterBanPeriod": BAN_PERIOD_MS,
+        "scanBanPeriod": BAN_PERIOD_MS,
+    }
+
+
+def value_mentions(value: Any, needle: str) -> bool:
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(value_mentions(item, needle) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(value_mentions(item, needle) for item in value)
+    return False
+
+
+def spam_dnsbl_validation_failed(error: str) -> bool:
+    text = str(error or "")
+    return "SpamDnsblServer" in text
+
+
+def named_object_ids(error: str, object_name: str) -> list[str]:
+    """Ids mentioned next to an object name in a JMAP validation error."""
+    found: list[str] = []
+    for match in re.finditer(re.escape(object_name), error or ""):
+        window = error[match.start() : match.start() + 240]
+        ident = re.search(r"""['"]id['"]\s*:\s*['"]([^'"]+)['"]""", window)
+        if ident and ident.group(1) not in found:
+            found.append(ident.group(1))
+    return found
+
+
+def dnsbl_ids_to_disable(servers: list[dict], error: str) -> list[str]:
+    """Servers whose expressions break ReloadSettings.
+
+    A named id is disabled on its own. Otherwise every server whose stored
+    expressions use ``bit_and`` is disabled. If the error names the type but
+    neither an id nor ``bit_and``, every enabled server is disabled so a
+    settings reload can succeed.
+    """
+    known = {str(server.get("id") or "") for server in servers}
+    named = [item for item in named_object_ids(error, "SpamDnsblServer") if item in known or not known]
+    if named:
+        return named
+    bit_and: list[str] = []
+    enabled: list[str] = []
+    for server in servers:
+        server_id = str(server.get("id") or "")
+        if not server_id or server.get("enable") is False:
+            continue
+        enabled.append(server_id)
+        if value_mentions(server, "bit_and"):
+            bit_and.append(server_id)
+    if bit_and:
+        return bit_and
+    if spam_dnsbl_validation_failed(error):
+        return enabled
+    return []
+
+
+def repair_spam_dnsbl_for_reload(config: dict, secrets: dict, error: str) -> list[str]:
+    """Disable SpamDnsblServer rows that make ReloadSettings refuse every object."""
+    try:
+        servers = _jmap_list(config, secrets, "SpamDnsblServer")
+    except RuntimeError as exc:
+        print(f"Warning: could not list SpamDnsblServer: {exc}", file=sys.stderr)
+        return []
+    disable = dnsbl_ids_to_disable(servers, error)
+    if not disable:
+        return []
+    names = {
+        str(server.get("id") or ""): str(server.get("name") or server.get("id") or "")
+        for server in servers
+    }
+    updated = _jmap_ok(
+        _jmap(
+            config,
+            secrets,
+            [
+                [
+                    "x:SpamDnsblServer/set",
+                    {"update": {server_id: {"enable": False} for server_id in disable}},
+                    "d",
+                ]
+            ],
+        ),
+        "d",
+    )
+    not_updated = updated.get("notUpdated") or {}
+    disabled = [server_id for server_id in disable if server_id not in not_updated]
+    for server_id in disabled:
+        label = names.get(server_id) or server_id
+        print(
+            f"  disabled SpamDnsblServer {label} ({server_id}); "
+            "its expression fails validation on this Stalwart version"
+        )
+    if not_updated:
+        print(f"Warning: could not disable some SpamDnsblServer rows: {not_updated}", file=sys.stderr)
+    return disabled
+
+
+def _run_reload_action(config: dict, secrets: dict, action: str) -> None:
+    result = _jmap_ok(
+        _jmap(
+            config,
+            secrets,
+            [
+                [
+                    "x:Action/set",
+                    {"create": {f"reload-{action}": {"@type": action}}},
+                    "r",
+                ]
+            ],
+        ),
+        "r",
+    )
+    not_created = result.get("notCreated") or {}
+    if not_created:
+        raise RuntimeError(str(not_created))
+
+
+def _report_reload_failure(label: str, exc: BaseException, *, warn: bool) -> None:
+    if warn:
+        print(f"Warning: could not reload {label}: {exc}", file=sys.stderr)
+    else:
+        print(f"  could not reload {label}: {str(exc)[:300]}")
+
+
+def reload_blocked_ips(config: dict, secrets: dict, *, warn: bool = True) -> bool:
+    try:
+        _run_reload_action(config, secrets, "ReloadBlockedIps")
+    except RuntimeError as exc:
+        _report_reload_failure("blocked/allowed IP caches", exc, warn=warn)
+        return False
+    print("  reloaded blocked/allowed IP caches")
     return True
 
 
-def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
-    """Unban Docker/Caddy IPs, allowlist 172.16.0.0/12, enable X-Forwarded-For.
+def reload_stalwart_security(config: dict, secrets: dict, *, warn: bool = True) -> SecurityReload:
+    """Reload settings and IP caches after API writes.
+
+    Stalwart keeps the listener's settings and blocklist in memory.
+    ReloadSettings activates scan-ban, ban periods and useXForwarded.
+    ReloadBlockedIps drops deleted bans. It always runs, even when
+    ReloadSettings is refused by an unrelated invalid object.
+    """
+    settings_ok = False
+    try:
+        _run_reload_action(config, secrets, "ReloadSettings")
+        settings_ok = True
+        print("  reloaded settings")
+    except RuntimeError as exc:
+        if spam_dnsbl_validation_failed(str(exc)):
+            print(
+                "  ReloadSettings refused a SpamDnsblServer expression; "
+                "disabling the broken servers and retrying…",
+                file=sys.stderr,
+            )
+            if repair_spam_dnsbl_for_reload(config, secrets, str(exc)):
+                try:
+                    _run_reload_action(config, secrets, "ReloadSettings")
+                    settings_ok = True
+                    print("  reloaded settings after disabling invalid DNSBL servers")
+                except RuntimeError as retry_exc:
+                    _report_reload_failure("settings", retry_exc, warn=warn)
+            else:
+                _report_reload_failure("settings", exc, warn=warn)
+        else:
+            _report_reload_failure("settings", exc, warn=warn)
+    blocked_ok = reload_blocked_ips(config, secrets, warn=warn)
+    return SecurityReload(settings_ok=settings_ok, blocked_ok=blocked_ok)
+
+
+def protect_caddy_from_autoban(
+    config: dict, secrets: dict, *, clear_all_blocks: bool = False
+) -> None:
+    """Unban proxy IPs, allowlist Docker networks, and make bans expire.
+
+    ``clear_all_blocks`` deletes every BlockedIp (used by ``--unlock-proxy``).
+    A normal apply only removes Docker and other private ranges, so a real
+    spam ban is left alone.
 
     Uses curl inside the existing stalwart container against 127.0.0.1 so this
     still works while Caddy is banned. No extra container is started.
@@ -1070,9 +1230,13 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
     for row in blocked:
         addr = _row_address(row)
         row_id = str(row.get("id") or "")
-        if row_id and address_is_docker_lan(addr or row_id):
+        if not row_id:
+            continue
+        if clear_all_blocks or address_is_docker_lan(addr or row_id):
             banned_ids.append(row_id)
             print(f"  removing BlockedIp {addr or row_id} ({row_id})")
+        else:
+            print(f"  leaving BlockedIp {addr or row_id} ({row_id})")
     if banned_ids:
         try:
             destroyed = _jmap_ok(
@@ -1136,8 +1300,10 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
         print("  Http.useXForwarded=true")
     except RuntimeError as exc:
         print(f"Warning: could not set Http.useXForwarded=true: {exc}", file=sys.stderr)
-    # AllowedIp does not stop auto-ban (Stalwart still writes BlockedIp). Disable
-    # URL scan-bans so Caddy is not locked out by internet probes it forwards.
+    # An address on the allowed list is never blocked, but only after
+    # ReloadSettings or a restart. A BlockedIp row that already exists is
+    # still enforced until it is deleted and ReloadBlockedIps runs.
+    # Immediate URL bans are also cleared, and every ban category expires.
     try:
         updated = _jmap_ok(
             _jmap(
@@ -1146,14 +1312,7 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
                 [
                     [
                         "x:Security/set",
-                        {
-                            "update": {
-                                "singleton": {
-                                    "scanBanPaths": {},
-                                    "scanBanRate": {"count": 1000000, "period": 86400000},
-                                }
-                            }
-                        },
+                        {"update": {"singleton": security_ban_policy()}},
                         "s",
                     ]
                 ],
@@ -1162,12 +1321,15 @@ def protect_caddy_from_autoban(config: dict, secrets: dict) -> None:
         )
         if updated.get("notUpdated"):
             raise RuntimeError(str(updated["notUpdated"]))
-        print("  Security.scanBanPaths cleared (Caddy is not treated as a scanner)")
+        print("  Security: scan-ban paths cleared; automatic bans expire after 1 hour")
     except RuntimeError as exc:
         print(f"Warning: could not update Security scan-ban: {exc}", file=sys.stderr)
-    if not reload_stalwart_security(config, secrets):
-        print("  Hot reload failed; restarting stalwart to flush stale IP caches…")
-        restart_stalwart_and_wait(config, secrets)
+    reloaded = reload_stalwart_security(config, secrets)
+    if reloaded:
+        return
+    print("  Hot reload failed; restarting stalwart to flush stale IP caches…")
+    if restart_stalwart_and_wait(config, secrets) and not reloaded.blocked_ok:
+        reload_blocked_ips(config, secrets)
 
 
 IDENTITY_SIDECAR = INTEGRATION_DIR / "identity-provider.yaml"
@@ -1830,7 +1992,7 @@ def apply_configuration(
     secrets = load_or_create_secrets(config)
     if unlock_proxy:
         render_runtime_artifacts(config, secrets)
-        protect_caddy_from_autoban(config, secrets)
+        protect_caddy_from_autoban(config, secrets, clear_all_blocks=True)
         if proxy_mode(config) == "integrate":
             print(
                 "Caddy fragment updated. Reload shared Caddy with: "

@@ -113,21 +113,43 @@ that as a port scan and bans Caddy's IP.
 If the container exited or is restarting, `docker restart stalwart` often brings it back. If `config.json` is missing under `{data_dir}/etc`, the wizard did not persist and Stalwart is in bootstrap again (`chown 2000:2000` that directory).
 
 If `127.0.0.1:8080` inside Stalwart returns HTTP 302 while Caddy receives
-`Connection reset by peer` (or `/admin` is 403 then goes silent), Stalwart has
-**scan-banned the Caddy container IP** on `easydeploy-net` (often `172.19.0.x`).
+`Connection reset by peer`, or `https://mail…/admin` is HTTP 403
+`application/problem+json`, or IMAPS/SMTPS accept the socket and close it
+before a ServerHello, Stalwart has auto-banned an address. A ban is enforced
+the moment the TCP connection is accepted, before TLS. With
+`Http.useXForwarded=true`, a banned browser IP is answered **403**; a banned
+Docker bridge address (often `172.19.0.x`) drops every mail client at once.
 That is not the Docker healthcheck (healthchecks come from `127.0.0.1`).
-`172.16.0.0/12` already includes `172.19.0.0/16` (Docker’s pool is 172.16–172.31).
-AllowedIp does **not** stop auto-ban: once Caddy is in BlockedIp, every request
-from it is dropped (502). Caddy is banned when Stalwart sees exploit URL probes
-or connections to both HTTP `:8080` and HTTPS `:443` from the proxy IP.
 
-Unban Docker/Caddy and allowlist the Docker bridge pool (uses `curl` already
-in the Stalwart container — no extra service):
+Addresses on the allowed list are never banned, but only after settings reload
+or a restart. A `BlockedIp` row that already exists is still enforced until it
+is deleted and the blocklist is reloaded. Stalwart’s own ban periods default
+to “forever”; this kit sets them to one hour so a false positive expires.
+
+Clear every ban (including your own public IP) and refresh the policy:
 
 ```bash
 cd /root/stalwart-easy-deploy
 bash apply.sh --unlock-proxy
 ```
+
+A normal `apply.sh` only removes Docker and other private `BlockedIp` rows, so
+it does not wipe a real spam ban. `--unlock-proxy` deletes **all** of them,
+allowlists `172.16.0.0/12`, clears immediate URL scan-bans, and sets
+`authBanPeriod`, `abuseBanPeriod`, `loiterBanPeriod` and `scanBanPeriod` to
+one hour.
+
+`ReloadBlockedIps` runs even when `ReloadSettings` is refused. A stored
+`SpamDnsblServer` whose expression this Stalwart version cannot parse (for
+example `bit_and` in a condition) refuses every settings reload. Unlock
+disables those servers, logs their names, and retries. Spam coverage for the
+disabled lists stays off until the rules match `stalwart.tag`.
+
+If the blocklist reload still fails, unlock restarts the existing container
+and reloads the blocklist again. `Http.useXForwarded=true` stays on so later
+HTTP bans apply to the client, not Caddy. `SystemSettings.proxyTrustedNetworks`
+must stay empty (this kit does not use Proxy Protocol). Caddy proxies plain
+HTTP to `stalwart:8080`.
 
 Then re-apply so Caddy drops scanner paths and talks to a single upstream:
 
@@ -136,14 +158,6 @@ bash apply.sh
 # integrate mode: also refresh shared Caddy
 cd /root/easydeploy-engine && bash apply.sh --skip-kits
 ```
-
-`apply.sh` also sets `Http.useXForwarded=true` so later scan-bans apply to the
-real client, not Caddy. `SystemSettings.proxyTrustedNetworks` must stay empty
-(this kit does not use Proxy Protocol). Caddy proxies plain HTTP to
-`stalwart:8080`. Stalwart v0.16 keeps these settings and its active blocklist
-in memory, so `--unlock-proxy` explicitly runs the `ReloadSettings` and
-`ReloadBlockedIps` actions after updating them. If either hot reload fails, it
-restarts only the existing Stalwart container to flush the stale cache.
 
 Mail ports are published directly by Docker, so this deployment does not need
 Proxy Protocol on any listener.
