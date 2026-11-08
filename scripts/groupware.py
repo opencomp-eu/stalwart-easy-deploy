@@ -12,6 +12,7 @@ import pwd
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -650,6 +651,50 @@ def _merge_identity(config: dict) -> dict:
     return config
 
 
+def sync_mailboxes(config: dict, secrets: dict) -> str:
+    """Create and remove Stalwart accounts for Kanidm's mail-users group.
+
+    This is the part that has to finish before Nextcloud Mail connects. The
+    five-minute contact sync also does it, but a person can sign in sooner.
+    """
+    from scripts.apply import _jmap
+    from scripts.mailboxes import provision_mail_users
+
+    _merge_identity(config)
+    if not _stalwart_running():
+        raise RuntimeError("stalwart container is not running")
+
+    def admin_jmap(calls: list, using: list[str] | None = None) -> dict:
+        return _jmap(config, secrets, calls, using=using or SETTINGS_USING, timeout=30)
+
+    people = fetch_kanidm_people()
+    return provision_mail_users(config, secrets, people, admin_jmap)
+
+
+def acknowledge_mailbox_sync(directory: Path, *, now: float | None = None) -> int:
+    """Mark sign-in requests done, and drop acknowledgements older than an hour.
+
+    Nextcloud writes one file per sign-in under ``requests/`` and waits until
+    that name appears in ``done/``. Moving the file is the signal that the
+    mailbox sync has finished.
+    """
+    requests = directory / "requests"
+    done = directory / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    if requests.is_dir():
+        for path in sorted(requests.iterdir()):
+            if not path.is_file():
+                continue
+            path.replace(done / path.name)
+            moved += 1
+    cutoff = (time.time() if now is None else now) - 3600
+    for path in done.iterdir():
+        if path.is_file() and path.stat().st_mtime < cutoff:
+            path.unlink()
+    return moved
+
+
 def sync_groupware(config: dict, secrets: dict) -> str:
     """Set collection names, then mirror Kanidm people into each mailbox."""
     from scripts.apply import _jmap, recovery_admin_user
@@ -958,11 +1003,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Wait if another sync is running, then sync. Used when a person was just created.",
     )
+    parser.add_argument(
+        "--mailboxes-only",
+        action="store_true",
+        help="Only create and remove mail-users mailboxes. Used when someone signs in.",
+    )
+    parser.add_argument(
+        "--ack-mailbox-sync",
+        metavar="DIR",
+        help="Move sign-in request files in DIR from requests/ to done/.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.ack_mailbox_sync:
+        try:
+            acknowledge_mailbox_sync(Path(args.ack_mailbox_sync))
+        except OSError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
     with sync_lock(blocking=args.wait) as acquired:
         if not acquired:
             print("Contact sync already running.")
@@ -974,7 +1036,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: missing {SECRETS_PATH}. Run apply.sh first.", file=sys.stderr)
             return 1
         try:
-            sync_groupware(config, load_yaml(SECRETS_PATH))
+            secrets = load_yaml(SECRETS_PATH)
+            if args.mailboxes_only:
+                sync_mailboxes(config, secrets)
+            else:
+                sync_groupware(config, secrets)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1

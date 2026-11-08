@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -164,6 +165,26 @@ def test_plan_adds_colleagues_updates_names_and_drops_removed_people():
 def test_groupware_waits_only_when_asked():
     assert parse_args([]).wait is False
     assert parse_args(["--wait"]).wait is True
+    assert parse_args(["--mailboxes-only", "--wait"]).mailboxes_only is True
+    assert parse_args(["--ack-mailbox-sync", "/tmp/queue"]).ack_mailbox_sync == "/tmp/queue"
+
+
+def test_acknowledge_mailbox_sync_moves_requests_and_drops_old_acks(tmp_path: Path):
+    from scripts.groupware import acknowledge_mailbox_sync
+
+    requests = tmp_path / "requests"
+    done = tmp_path / "done"
+    requests.mkdir()
+    done.mkdir()
+    (requests / "fresh").write_text("fresh")
+    old = done / "old"
+    old.write_text("old")
+    os.utime(old, (1, 1))
+    moved = acknowledge_mailbox_sync(tmp_path, now=10_000)
+    assert moved == 1
+    assert not (requests / "fresh").exists()
+    assert (done / "fresh").is_file()
+    assert not old.exists()
 
 
 def test_impersonation_username_puts_the_mailbox_first():
