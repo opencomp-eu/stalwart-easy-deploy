@@ -18,6 +18,11 @@ from scripts.apply import (
     build_ldap_directory,
     build_oidc_directory,
     bulwark_oauth_env_lines,
+    pin_webui_bundle,
+    webui_pin_changes,
+    webui_url_is_incompatible,
+    WEBUI_COMPAT_URL,
+    WEBUI_FLOATING_LATEST,
     _directory_matches,
     derive_compose_files,
     compose_file_paths,
@@ -618,6 +623,56 @@ def test_bulwark_oauth_env_lines_from_sidecar(tmp_path, monkeypatch):
     assert "AUTO_SSO_ENABLED=true" in lines
     assert "OAUTH_CLIENT_ID=stalwart-webui" in lines
     assert "OAUTH_ISSUER_URL=https://idm.test.example/oauth2/openid/stalwart-webui" in lines
+
+
+def test_webui_pin_changes_only_floating_or_v2_bundles():
+    assert webui_url_is_incompatible(WEBUI_FLOATING_LATEST)
+    assert webui_url_is_incompatible(
+        "https://github.com/stalwartlabs/webui/releases/download/v2.0.5/webui.zip"
+    )
+    assert not webui_url_is_incompatible(WEBUI_COMPAT_URL)
+    assert not webui_url_is_incompatible("https://example.com/custom-webui.zip")
+    changes = webui_pin_changes(
+        [
+            {"id": "app-1", "resourceUrl": WEBUI_FLOATING_LATEST},
+            {"id": "app-2", "resourceUrl": WEBUI_COMPAT_URL},
+            {"resourceUrl": WEBUI_FLOATING_LATEST},
+        ]
+    )
+    assert changes == {"app-1": {"resourceUrl": WEBUI_COMPAT_URL}}
+
+
+def test_pin_webui_bundle_updates_and_unpacks(monkeypatch):
+    calls: list[str] = []
+
+    def fake_list(_config, _secrets, type_name):
+        assert type_name == "Application"
+        return [{"id": "app-1", "resourceUrl": WEBUI_FLOATING_LATEST}]
+
+    def fake_jmap(_config, _secrets, method_calls, **_kwargs):
+        method, payload, cid = method_calls[0]
+        calls.append(method)
+        if method == "x:Application/set":
+            assert payload["update"]["app-1"]["resourceUrl"] == WEBUI_COMPAT_URL
+            return {"methodResponses": [[method, {"updated": {"app-1": None}}, cid]]}
+        return {"methodResponses": [[method, {"created": {"reload-UpdateApps": {"id": "a"}}}, cid]]}
+
+    monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    pin_webui_bundle({}, {})
+    assert calls == ["x:Application/set", "x:Action/set"]
+
+
+def test_pin_webui_bundle_skips_a_compatible_url(monkeypatch):
+    def fake_list(_config, _secrets, type_name):
+        return [{"id": "app-1", "resourceUrl": WEBUI_COMPAT_URL}]
+
+    def fake_jmap(*_args, **_kwargs):
+        raise AssertionError("compatible WebUI must not be rewritten")
+
+    monkeypatch.setattr("scripts.apply._jmap_list", fake_list)
+    monkeypatch.setattr("scripts.apply._jmap", fake_jmap)
+    pin_webui_bundle({}, {})
 
 
 def test_ensure_data_dirs_creates_bulwark_layout(tmp_path):

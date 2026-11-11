@@ -821,6 +821,12 @@ JMAP_URLS = (
     "http://127.0.0.1:8080/jmap",
     "http://127.0.0.1:8080/api",
 )
+# Stalwart 0.16 ships WebUI 1.x. The default Application URL follows GitHub
+# "latest", which became WebUI 2.x when Stalwart 1.0 shipped. That bundle
+# refuses to sign in unless the provider advertises client-metadata documents,
+# which neither 0.16 nor Kanidm does. Pin the last 1.x bundle instead.
+WEBUI_COMPAT_URL = "https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip"
+WEBUI_FLOATING_LATEST = "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip"
 
 
 def _jmap_ok(response: dict, call_id: str) -> dict:
@@ -1111,6 +1117,56 @@ def repair_spam_dnsbl_for_reload(config: dict, secrets: dict, error: str) -> lis
     if not_updated:
         print(f"Warning: could not disable some SpamDnsblServer rows: {not_updated}", file=sys.stderr)
     return disabled
+
+
+def webui_url_is_incompatible(url: str) -> bool:
+    """True when a 0.16 server would unpack a WebUI that cannot sign in."""
+    value = url.strip().rstrip("/")
+    if not value:
+        return False
+    lowered = value.lower()
+    if lowered == WEBUI_FLOATING_LATEST.rstrip("/").lower():
+        return True
+    if "/stalwartlabs/webui/releases/latest/" in lowered:
+        return True
+    return "/stalwartlabs/webui/releases/download/v2" in lowered
+
+
+def webui_pin_changes(applications: list[dict]) -> dict[str, dict[str, str]]:
+    changes: dict[str, dict[str, str]] = {}
+    for app in applications:
+        if not isinstance(app, dict) or not app.get("id"):
+            continue
+        url = str(app.get("resourceUrl") or "")
+        if not webui_url_is_incompatible(url):
+            continue
+        changes[str(app["id"])] = {"resourceUrl": WEBUI_COMPAT_URL}
+    return changes
+
+
+def pin_webui_bundle(config: dict, secrets: dict) -> None:
+    """Keep the admin UI on the WebUI 1.x bundle this server can sign in with."""
+    try:
+        applications = _jmap_list(config, secrets, "Application")
+    except RuntimeError as exc:
+        if _is_bootstrap_error(exc):
+            return
+        raise RuntimeError(f"Could not list Stalwart applications: {exc}") from exc
+    changes = webui_pin_changes(applications)
+    if not changes:
+        return
+    updated = _jmap_ok(
+        _jmap(
+            config,
+            secrets,
+            [["x:Application/set", {"update": changes}, "u"]],
+        ),
+        "u",
+    )
+    if updated.get("notUpdated"):
+        raise RuntimeError(f"Could not pin the Stalwart WebUI: {updated['notUpdated']}")
+    _run_reload_action(config, secrets, "UpdateApps")
+    print(f"  Pinned Stalwart WebUI to {WEBUI_COMPAT_URL}")
 
 
 def _run_reload_action(config: dict, secrets: dict, action: str) -> None:
@@ -1915,6 +1971,7 @@ def reconcile_runtime(skip_pull: bool = False) -> None:
         restart_stalwart_and_wait(config, secrets)
     protect_caddy_from_autoban(config, secrets)
     apply_kanidm_directory(config, secrets)
+    pin_webui_bundle(config, secrets)
     apply_mail_fallback(config, secrets)
     from scripts.groupware import sync_groupware_locked
     from scripts.mail_tls import apply_mail_certificate
