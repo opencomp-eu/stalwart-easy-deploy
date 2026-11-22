@@ -1,0 +1,4 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["local>opencomp-eu/easydeploy-engine//renovate/easydeploy"]
+}
