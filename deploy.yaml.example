@@ -17,7 +17,7 @@ bulwark:
   enabled: true
   domain: webmail.example.com
   image: ghcr.io/bulwarkmail/webmail
-  tag: "1.9.2"
+  tag: "1.21.3"
   data_dir: /var/lib/bulwark
   app_name: Webmail
 
